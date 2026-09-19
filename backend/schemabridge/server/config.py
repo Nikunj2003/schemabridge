@@ -40,7 +40,14 @@ class Settings(BaseSettings):
 
     # --- Destination connector -------------------------------------------
     target_api_secret: str = Field(default="", alias="TARGET_API_SECRET")
+    #: Where outbound delivery is sent. Must be an origin *this service* can
+    #: reach, which is not always the one the browser used: in local development
+    #: the browser talks to the web service and is proxied here, so the
+    #: browser's origin would not resolve to the destination at all.
     target_api_origin: str | None = Field(default=None, alias="TARGET_API_ORIGIN")
+    #: Port this service is listening on, used to build a loopback origin when
+    #: none is configured.
+    port: int = Field(default=8000, alias="PORT")
 
     # --- Demo safety budgets ---------------------------------------------
     max_model_requests_per_run: int = Field(default=3, alias="AI_MAX_REQUESTS_PER_RUN")

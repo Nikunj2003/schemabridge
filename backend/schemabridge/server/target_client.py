@@ -24,6 +24,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -103,16 +104,39 @@ class DeliveryResult:
 def _resolve_origin(request_origin: str | None) -> str:
     """Where to send records.
 
-    Taken from configuration, falling back to the origin of the request being
-    served. Deliberately never from a header or uploaded data: a destination URL
-    an attacker can influence turns this into a request-forgery tool.
+    Configuration first, then the origin of the request being served, then
+    loopback. Never a client-supplied header or anything from an uploaded file: a
+    destination URL an attacker can influence turns this into a request-forgery
+    tool.
+
+    The request origin is only usable when this service serves the public origin
+    itself. Behind a proxy — as in local development, where the browser talks to
+    the web service on another port — that origin does not route to this
+    service's own endpoints, so loopback is the correct fallback rather than a
+    last resort.
     """
     settings = get_settings()
     if settings.target_api_origin:
         return settings.target_api_origin
-    if request_origin:
+    if request_origin and _is_reachable(request_origin):
         return request_origin.rstrip("/")
-    return "http://127.0.0.1:8000"
+    return f"http://127.0.0.1:{settings.port}"
+
+
+def _is_reachable(origin: str) -> bool:
+    """Whether this service can plausibly answer requests on that origin.
+
+    A loopback origin is only ours if it names the port we are listening on;
+    anything else on localhost belongs to a different process.
+    """
+    settings = get_settings()
+    try:
+        parsed = urlparse(origin)
+    except ValueError:
+        return False
+    if parsed.hostname in {"127.0.0.1", "localhost", "::1"}:
+        return (parsed.port or (443 if parsed.scheme == "https" else 80)) == settings.port
+    return bool(parsed.hostname)
 
 
 def _retry_after(response: httpx.Response) -> datetime | None:

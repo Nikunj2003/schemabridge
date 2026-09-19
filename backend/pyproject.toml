@@ -38,6 +38,7 @@ dev = [
   "python-dotenv==1.2.3",
   "pandas-stubs==3.0.5.260914",
   "types-jsonschema==4.26.0.20260518",
+  "types-openpyxl==3.1.5.20260827",
 ]
 
 [tool.vercel]

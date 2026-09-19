@@ -35,8 +35,12 @@ class TestUserDefinedNames:
     def test_a_name_outside_the_builtin_template_is_accepted(self) -> None:
         """A user's own schema can name a field anything."""
         assert _decision("costCentreRef").target == "costCentreRef"
-        assert MappingCandidate(column_id="f0:c1", target="tier", basis=MappingBasis.ALIAS).target == "tier"
-        assert IssueOption(id="map:tier", label="Map to Tier", detail="", target="tier").target == "tier"
+
+        candidate = MappingCandidate(column_id="f0:c1", target="tier", basis=MappingBasis.ALIAS)
+        assert candidate.target == "tier"
+
+        option = IssueOption(id="map:tier", label="Map to Tier", detail="", target="tier")
+        assert option.target == "tier"
 
     def test_an_absent_target_is_still_allowed(self) -> None:
         """A column that matches nothing has no target at all."""

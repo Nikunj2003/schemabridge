@@ -23,6 +23,9 @@ dependencies = [
   "jsonschema==4.26.0",
   # Outbound delivery to the destination API.
   "httpx==0.28.1",
+  # Transitively required by requests (via langchain); declared explicitly so
+  # the runtime does not emit a missing-dependency warning on every import.
+  "charset-normalizer==3.4.4",
 ]
 
 [project.optional-dependencies]

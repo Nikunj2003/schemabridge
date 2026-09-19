@@ -1,0 +1,68 @@
+[project]
+name = "schemabridge"
+version = "0.1.0"
+description = "Migration engine: reconciles inconsistent exports, transforms safely, escalates only genuine uncertainty."
+requires-python = ">=3.12"
+
+dependencies = [
+  # Web layer
+  "fastapi==0.141.1",
+  "pydantic==2.13.5",
+  "pydantic-settings==2.15.0",
+  "python-multipart==0.0.32",
+  # Agent orchestration. The Mongo checkpointer is what makes a paused run
+  # survive the next request landing in a different process.
+  "langgraph==1.2.11",
+  "langgraph-checkpoint-mongodb==0.5.0",
+  "langchain-openai==1.6.2",
+  # Data handling. pandas is used for column profiling only; openpyxl reads
+  # workbooks. Deliberately no polars alongside pandas: the Python bundle
+  # limit is 500 MB and pandas plus numpy already account for ~106 MB.
+  "pandas==3.0.6",
+  "openpyxl==3.1.5",
+  "jsonschema==4.26.0",
+  # Outbound delivery to the destination API.
+  "httpx==0.28.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+  "ruff==0.16.8",
+  "mypy==2.3.1",
+  "uvicorn==0.53.0",
+  "python-dotenv==1.2.3",
+  "pandas-stubs==3.0.5.260914",
+]
+
+[tool.vercel]
+entrypoint = "main:app"
+
+[tool.setuptools.packages.find]
+include = ["schemabridge*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF", "ASYNC", "S"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["langgraph.*", "langchain_openai.*", "langchain_core.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

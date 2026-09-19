@@ -1,0 +1,4 @@
+employeeId,fullName,workEmail,startDate,department,employmentType
+C-9001,Leena Das,leena.das@example.com,2026-02-02,Support,full_time
+C-9002,Omar Faruq,omar.faruq@example.com,2026-02-09,Support,part_time
+C-9003,Tara Bose,tara.bose@example.com,2026-03-16,Support,contract

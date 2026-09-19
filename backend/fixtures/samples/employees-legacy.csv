@@ -1,0 +1,9 @@
+emp_id,emp_nm,email,doj,dept,emp_type
+E-1001,  Priya Sharma ,Priya.Sharma@EXAMPLE.COM,14 March 2026,Engineering,Full Time
+E-1002,Rahul Verma,rahul.verma@example.com,2026-01-06,Finance,full-time
+E-1003,Asha Rao,asha.rao@example.com,2 April 2026,Operations,Contract
+E-1004,Vikram Nair,vikram.nair@example.com,03/04/2026,Engineering,Full Time
+E-1005,Meera Joshi,meera.joshi@@example..com,2026-02-17,Design,Part Time
+000123,Sanjay Gupta,sanjay.gupta@example.com,2026-05-11,Finance,Intern
+E-1007,Deepa Iyer,deepa.iyer@example.com,2026-03-02,Operations,Full Time
+E-1008,Arjun Mehta,arjun.mehta@example.com,2026-04-20,Engineering,Contract

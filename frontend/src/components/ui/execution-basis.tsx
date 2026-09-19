@@ -3,18 +3,18 @@ import { cn } from "@/lib/utils";
 
 const CONTENT: Record<ExecutionBasis, { label: string; title: string; tone: string }> = {
   deterministic: {
-    label: "Rule applied",
-    title: "A deterministic policy or validation rule produced this action.",
+    label: "Rule engine",
+    title: "A deterministic rule did this: a header alias, a safe repair, a validation check or a delivery policy.",
     tone: "border-line bg-sunken text-ink-muted",
   },
   model_assisted: {
-    label: "Model-assisted",
-    title: "A model proposal informed this action and the engine verified it before applying it.",
+    label: "LLM",
+    title: "A model request is part of this step. Anything the model suggests is verified against the schema before it is applied.",
     tone: "border-accent/30 bg-accent-soft text-accent-ink",
   },
   human: {
-    label: "Human decision",
-    title: "A reviewer made this decision.",
+    label: "Your decision",
+    title: "You answered this, and the engine did what you chose.",
     tone: "border-attention/30 bg-attention-soft text-attention",
   },
   unknown: {
@@ -24,7 +24,13 @@ const CONTENT: Record<ExecutionBasis, { label: string; title: string; tone: stri
   },
 };
 
-/** Small, text-backed audit provenance that never guesses model involvement. */
+/**
+ * Which subsystem did the work, in words as well as an icon.
+ *
+ * It names the actor rather than the verdict, because "where did the LLM run"
+ * and "where did the rules run" is the question the audit has to answer. The
+ * value comes from the backend's recorded basis, never from the event wording.
+ */
 export function ExecutionBasis({ basis, compact = false }: { basis: ExecutionBasis; compact?: boolean }) {
   const content = CONTENT[basis];
   return (

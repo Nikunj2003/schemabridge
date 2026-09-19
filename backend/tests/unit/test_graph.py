@@ -135,32 +135,85 @@ class TestCleanRunNeedsNoHuman:
         # An agent actor does not imply model use: this run followed policy only.
         assert {e.execution_basis for e in result["events"]} == {EventExecutionBasis.DETERMINISTIC}
 
+    def _assist(self, monkeypatch: pytest.MonkeyPatch, outcome: Any) -> tuple[Any, ...]:
+        """Run the model-assistance node against a fixed proposal outcome."""
+        from schemabridge.graph import nodes
+
+        state = initial_state(["employees-clean.csv"])
+        state["unresolved_columns"] = (state["columns"][0].id,)
+        monkeypatch.setattr(nodes, "propose_unresolved_mappings", lambda *_a, **_k: outcome)
+        result = nodes.assist_with_model(cast(MigrationState, state))
+        return tuple(result["events"])
+
     def test_model_assistance_records_its_own_execution_basis(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from schemabridge.agent.propose import AcceptedMapping, ProposalOutcome
-        from schemabridge.graph import nodes
 
         state = initial_state(["employees-clean.csv"])
-        column = state["columns"][0]
-        state["unresolved_columns"] = (column.id,)
-        monkeypatch.setattr(
-            nodes,
-            "propose_unresolved_mappings",
-            lambda *_args, **_kwargs: ProposalOutcome(
+        column_id = state["columns"][0].id
+        events = self._assist(
+            monkeypatch,
+            ProposalOutcome(
                 accepted=(
                     AcceptedMapping(
-                        column_id=column.id,
+                        column_id=column_id,
                         target="employeeId",
                         evidence=("Verified model suggestion.",),
                     ),
-                )
+                ),
+                requests_used=1,
+                considered=(column_id,),
             ),
         )
 
-        result = nodes.assist_with_model(cast(MigrationState, state))
+        # The call itself is recorded first, then what it produced, so the trail
+        # reads in the order the work actually happened.
+        assert [e.action for e in events] == ["model_requested", "mapping_applied"]
+        assert [e.seq for e in events] == sorted(e.seq for e in events)
+        assert {e.execution_basis for e in events} == {EventExecutionBasis.MODEL_ASSISTED}
 
-        assert result["events"][0].execution_basis is EventExecutionBasis.MODEL_ASSISTED
+    def test_a_request_whose_suggestions_were_all_refused_is_still_marked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A model call must never be invisible just because nothing was applied."""
+        from schemabridge.agent.propose import ProposalOutcome
+
+        state = initial_state(["employees-clean.csv"])
+        column_id = state["columns"][0].id
+        events = self._assist(
+            monkeypatch,
+            ProposalOutcome(
+                rejected=((column_id, "The values do not look like that field."),),
+                requests_used=1,
+                considered=(column_id,),
+            ),
+        )
+
+        marked = [e for e in events if e.execution_basis is EventExecutionBasis.MODEL_ASSISTED]
+        assert [e.action for e in marked] == ["model_requested"]
+        # The refusal was the rule engine's, and says whose proposal it refused.
+        refusal = next(e for e in events if e.action == "mapping_suggestion_rejected")
+        assert refusal.execution_basis is EventExecutionBasis.DETERMINISTIC
+        assert "model proposed" in refusal.reason
+
+    def test_no_request_means_no_model_mark(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An exhausted budget never calls out, so nothing may claim it did."""
+        from schemabridge.agent.propose import ProposalOutcome
+
+        state = initial_state(["employees-clean.csv"])
+        column_id = state["columns"][0].id
+        events = self._assist(
+            monkeypatch,
+            ProposalOutcome(
+                requests_used=0,
+                unavailable_reason="The daily allowance is spent.",
+                considered=(column_id,),
+            ),
+        )
+
+        assert [e.action for e in events] == ["model_unavailable"]
+        assert all(e.execution_basis is EventExecutionBasis.DETERMINISTIC for e in events)
 
 
 class TestMessyRunPausesForAHuman:

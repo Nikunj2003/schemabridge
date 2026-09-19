@@ -194,6 +194,27 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
     added: list[MappingDecision] = []
     events: list[AuditEvent] = []
 
+    # The call itself, recorded where it happened. Without this a request whose
+    # every suggestion the verifier then refused would leave no trace of the model
+    # in the trail at all, while the run's model_requests counter said otherwise.
+    # Keyed on requests_used, so an exhausted budget — which never calls out —
+    # records nothing, and a provider timeout still records that a call was made.
+    if outcome.requests_used > 0:
+        events.append(
+            _event(
+                seq,
+                "model_requested",
+                (
+                    f"Asked the model about {len(outcome.considered)} column(s) the "
+                    f"rules could not place. Every reply is verified before it is used."
+                ),
+                execution_basis=EventExecutionBasis.MODEL_ASSISTED,
+                columns=len(outcome.considered),
+                requests=outcome.requests_used,
+            )
+        )
+        seq += 1
+
     for accepted in outcome.accepted:
         # No enum reconstruction here: the name came from the run's schema, which
         # is chosen per run, so TargetField(...) would raise for anything outside
@@ -228,7 +249,7 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
             _event(
                 seq,
                 "mapping_suggestion_rejected",
-                why,
+                f"The model proposed a field for this column and it was refused. {why}",
                 # The verifier rejected the proposal, so this recorded action is
                 # deterministic—not an accepted model-assisted decision.
                 execution_basis=EventExecutionBasis.DETERMINISTIC,

@@ -46,7 +46,9 @@ export function RunView({ runId }: { runId: string }) {
   const latest = run.events.at(-1);
   const question = open[0] ? presentQuestion(open[0], run.records, run.schema_fields) : null;
   const reviewOpen = question !== null && dismissedQuestion !== question.id;
-  const modelAssisted = run.events.filter((event) => event.execution_basis === "model_assisted").length;
+  const modelAssisted = run.events.filter(
+    (event) => event.execution_basis === "model_assisted",
+  ).length;
 
   return (
     <Frame>
@@ -86,7 +88,7 @@ export function RunView({ runId }: { runId: string }) {
         <Stages stages={stages} />
       </section>
 
-      <ModelInvolvement requests={run.counters.model_requests} verifiedActions={modelAssisted} />
+      <ModelInvolvement requests={run.counters.model_requests} llmSteps={modelAssisted} />
 
       {refreshError && (
         <p role="status" className="mt-4 rounded-md border border-attention/30 bg-attention-soft px-4 py-3 text-[13px] text-attention">
@@ -154,16 +156,22 @@ export function RunView({ runId }: { runId: string }) {
   );
 }
 
-function ModelInvolvement({ requests, verifiedActions }: { requests: number; verifiedActions: number }) {
-  const message = requests === 0
-    ? "No LLM requests were used in this migration."
-    : verifiedActions > 0
-      ? `${requests} LLM request${requests === 1 ? " was" : "s were"} attempted; ${verifiedActions} recorded action${verifiedActions === 1 ? " used" : "s used"} a verified suggestion.`
-      : `${requests} LLM request${requests === 1 ? " was" : "s were"} attempted; no suggestion was applied.`;
+/**
+ * Where the LLM took part, stated from counters the engine actually recorded.
+ *
+ * `llmSteps` counts audit rows marked LLM, which includes the request itself, so
+ * a request the verifier then refused is still visible here and in the trail.
+ */
+function ModelInvolvement({ requests, llmSteps }: { requests: number; llmSteps: number }) {
+  const plural = requests === 1 ? "request" : "requests";
+  const message =
+    requests === 0
+      ? "The rule engine did all of this. No LLM request was made."
+      : `${requests} LLM ${plural} in this migration, marked in the audit below. Anything the model suggests is checked against the schema before it is applied.`;
   return (
     <section className="mt-3 flex flex-wrap items-center gap-2 rounded-md border border-line bg-surface px-4 py-2.5 text-[12.5px] text-ink-muted">
-      {verifiedActions > 0 && <ExecutionBasis basis="model_assisted" compact />}
-      <span>{message} Suggestions are checked before use.</span>
+      {llmSteps > 0 && <ExecutionBasis basis="model_assisted" compact />}
+      <span>{message}</span>
     </section>
   );
 }

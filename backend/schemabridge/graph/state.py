@@ -1,0 +1,134 @@
+"""The workflow's state, and how concurrent updates to it combine.
+
+Reducers matter here. A resumed run re-enters the graph with whatever the
+checkpointer persisted, so anything append-only — audit events, applied
+mappings, delivery attempts — must accumulate rather than be replaced. Getting
+that wrong loses the record of what the engine already did, which is precisely
+what the audit trail exists to prevent.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Annotated, Any, TypedDict
+
+from schemabridge.domain.models import (
+    AuditEvent,
+    CanonicalRecord,
+    ColumnProfile,
+    DeliveryIntent,
+    MappingDecision,
+    ReviewIssue,
+    RunPhase,
+    SourceColumn,
+    SourceFile,
+    SourceRow,
+)
+
+
+def append[T](existing: Sequence[T] | None, incoming: Sequence[T] | T | None) -> tuple[T, ...]:
+    """Append-only channel reducer.
+
+    Written explicitly rather than using `operator.add` because the checkpointer
+    round-trips these values, and a channel can therefore be handed a list where
+    it last held a tuple. `operator.add` raises on that mix; normalising both
+    sides keeps a resumed run working.
+    """
+    current: tuple[T, ...] = tuple(existing) if existing else ()
+    if incoming is None:
+        return current
+    if isinstance(incoming, str | bytes) or not isinstance(incoming, Sequence):
+        return (*current, incoming)
+    return (*current, *incoming)
+
+
+def replace_records(
+    _existing: Sequence[CanonicalRecord] | None, incoming: Sequence[CanonicalRecord]
+) -> tuple[CanonicalRecord, ...]:
+    """Records are recomputed wholesale after a correction, so replace them.
+
+    Appending would leave stale revisions alongside the corrected ones, and the
+    UI would show both.
+    """
+    return tuple(incoming)
+
+
+def merge_issues(
+    existing: Sequence[ReviewIssue] | None, incoming: Sequence[ReviewIssue]
+) -> tuple[ReviewIssue, ...]:
+    """Merge by id, preserving any resolution the reviewer already supplied.
+
+    Nodes downstream of review re-derive their issues, so `reconcile` and
+    `clean_and_validate` re-emit a fresh copy of the same id on every pass. If
+    the incoming copy simply won, a resolved issue would silently reopen and the
+    reviewer would be asked the same question forever. A resolution is therefore
+    sticky: only its detail is refreshed.
+    """
+    by_id = {issue.id: issue for issue in (existing or ())}
+    for issue in incoming:
+        previous = by_id.get(issue.id)
+        if previous is not None and previous.resolution is not None:
+            # Keep the decision and the status; take updated context.
+            by_id[issue.id] = issue.model_copy(
+                update={"status": previous.status, "resolution": previous.resolution}
+            )
+        else:
+            by_id[issue.id] = issue
+    return tuple(by_id.values())
+
+
+def merge_deliveries(
+    existing: Sequence[DeliveryIntent] | None, incoming: Sequence[DeliveryIntent]
+) -> tuple[DeliveryIntent, ...]:
+    """Merge by record id: the latest attempt history for a record wins."""
+    by_record = {intent.record_id: intent for intent in (existing or ())}
+    for intent in incoming:
+        by_record[intent.record_id] = intent
+    return tuple(by_record.values())
+
+
+class MigrationState(TypedDict, total=False):
+    """Everything the workflow carries between steps.
+
+    Persisted by the checkpointer, so every value must round-trip through
+    serialisation. Pydantic models handle that; raw objects would not.
+    """
+
+    # --- Identity and configuration -------------------------------------
+    run_id: str
+    owner_session_id: str
+    policy_version: str
+
+    # --- Source data ----------------------------------------------------
+    files: tuple[SourceFile, ...]
+    columns: tuple[SourceColumn, ...]
+    rows: tuple[SourceRow, ...]
+    profiles: tuple[ColumnProfile, ...]
+
+    # --- Decisions ------------------------------------------------------
+    #: Append-only: a resumed run must not lose mappings already applied.
+    mappings: Annotated[tuple[MappingDecision, ...], append]
+    #: Columns with no deterministic answer, offered to the model.
+    unresolved_columns: tuple[str, ...]
+    #: Reviewer choices, keyed by issue id, so a resume knows what was decided.
+    resolutions: dict[str, Any]
+
+    # --- Results --------------------------------------------------------
+    records: Annotated[tuple[CanonicalRecord, ...], replace_records]
+    issues: Annotated[tuple[ReviewIssue, ...], merge_issues]
+    deliveries: Annotated[tuple[DeliveryIntent, ...], merge_deliveries]
+
+    # --- Observability --------------------------------------------------
+    #: Append-only and monotonic. Doubles as the UI's polling cursor.
+    events: Annotated[tuple[AuditEvent, ...], append]
+    phase: RunPhase
+    #: Set when the run cannot continue for an infrastructure reason.
+    blocked_reason: str | None
+    #: Upstream model requests already spent, enforced against the budget.
+    model_requests: int
+
+
+def next_sequence(state: MigrationState) -> int:
+    """The next audit sequence number for this run."""
+    events = state.get("events", ())
+    return (max((event.seq for event in events), default=0)) + 1

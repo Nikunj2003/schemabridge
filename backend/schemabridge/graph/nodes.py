@@ -64,9 +64,14 @@ def _label(schema: TargetSchema, name: str | None) -> str:
 
 
 def _subject_of(schema: TargetSchema, record: CanonicalRecord) -> str:
-    """How to name a record in the audit trail: its identity value, else its id."""
-    identity = schema.identity_field
-    if identity and (value := record.values.get(identity)):
+    """How to name a record in the audit trail.
+
+    The schema's naming field rather than its identity field: a detected schema
+    declares no identity, and "rec:row-3" is a handle the reviewer cannot find in
+    their own file.
+    """
+    naming = schema.naming_field
+    if naming and (value := record.values.get(naming)):
         return value
     return record.id
 
@@ -753,8 +758,15 @@ def deliver(state: MigrationState) -> dict[str, Any]:
 
             # Per-record demo behaviour, configured by the run rather than
             # inferred from the data, so production logic has no test branches.
+            #
+            # Keyed on the record's *identity*, not the name shown in the audit
+            # trail: those diverged once display started preferring a person's
+            # name, and looking the behaviour up by "Asha Rao" silently matched
+            # nothing.
             demo_headers: dict[str, str] = {}
-            behaviour = demo_config.get(subject)
+            identity = schema.identity_field
+            demo_key = (identity and record.values.get(identity)) or record.id
+            behaviour = demo_config.get(demo_key)
             if behaviour == "fail_once" and attempt_number == 1:
                 demo_headers["x-demo-fail-once"] = "1"
             elif behaviour == "reject":

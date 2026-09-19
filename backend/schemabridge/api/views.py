@@ -143,6 +143,9 @@ class RunView(BaseModel):
     #: The contract this run was validated against, named so the UI can say which.
     schema_name: str
     schema_id: str
+    #: Its fields, so the record tables can show the right columns. A run on a
+    #: schema with nothing to do with employment must not render "Work email".
+    schema_fields: list[dict[str, Any]]
 
 
 _PHASE_LABELS: dict[RunPhase, str] = {
@@ -223,7 +226,10 @@ def _record_views(
                 id=_attr(record, "id", ""),
                 # Whatever the schema calls its identity field, so a record is
                 # nameable in a migration that has nothing to do with employment.
-                employee_id=(values.get(schema.identity_field) if schema.identity_field else None),
+                # The schema's own naming field, so a record stays identifiable in
+                # a migration that has nothing to do with employment — and in one
+                # whose schema was detected and declares no identity at all.
+                employee_id=(values.get(schema.naming_field) if schema.naming_field else None),
                 values=values,
                 disposition=disposition,
                 sources=[
@@ -409,6 +415,7 @@ def build_run_view(
         blocked_reason=state.get("blocked_reason"),
         schema_name=schema.name,
         schema_id=schema.schema_id,
+        schema_fields=target_schema_view(schema)["fields"],
     )
 
 

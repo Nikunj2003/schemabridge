@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 /**
  * One decision, with the evidence beside it.
  *
- * The question names the employee, because "IDENTITY_CONFLICT" means nothing to
+ * The question names the record, because "IDENTITY_CONFLICT" means nothing to
  * the person answering. The sources sit side by side so nobody has to open the
  * spreadsheet, and each option states what it would do.
  *
@@ -78,7 +78,7 @@ export function Decision({
         </span>
         {question.affected > 1 && (
           <span className="text-[12.5px] text-ink-muted">
-            Affects {question.affected} employees
+            Affects {question.affected} records
           </span>
         )}
       </div>

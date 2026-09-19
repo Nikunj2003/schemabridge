@@ -315,6 +315,89 @@ class TestDeliveryOnAnUnknownSchema:
         }
 
 
+class TestNamingARecord:
+    """A reviewer must always see a handle they can find in their own file."""
+
+    def test_a_person_name_is_preferred(self) -> None:
+        from schemabridge.domain.target import BUILTIN_SCHEMA
+
+        assert BUILTIN_SCHEMA.naming_field == "fullName"
+
+    def test_the_identity_field_is_next(self) -> None:
+        assert ORDERS.naming_field == "orderRef"
+
+    def test_an_identifier_serves_when_nothing_is_declared(self) -> None:
+        """A detected schema declares no identity, and "rec:row-3" is useless.
+
+        Display is a different question from merging: a guess is fine here and
+        wrong only cosmetically, whereas guessing an identity field would merge
+        or split records.
+        """
+        detected = TargetSchema(
+            schema_id="detected",
+            name="Detected",
+            fields=(
+                TargetFieldSpec(name="empId", label="Emp id", kind=ValueKind.IDENTIFIER),
+                TargetFieldSpec(name="dept", label="Dept", kind=ValueKind.TEXT),
+            ),
+        )
+        assert detected.identity_field is None
+        assert detected.naming_field == "empId"
+
+    def test_a_required_field_is_the_last_resort(self) -> None:
+        schema = TargetSchema(
+            schema_id="x",
+            name="X",
+            fields=(
+                TargetFieldSpec(name="note", label="Note", kind=ValueKind.TEXT),
+                TargetFieldSpec(name="code", label="Code", kind=ValueKind.TEXT, required=True),
+            ),
+        )
+        assert schema.naming_field == "code"
+
+    def test_a_conflict_names_the_record_by_its_naming_field(self) -> None:
+        """The audit trail and the question both say "ORD-1", never "rec:ord-1"."""
+        result = reconcile_identities(
+            [
+                row({"orderRef": "ORD-1", "tier": "standard"}),
+                row({"orderRef": "ORD-1", "tier": "express"}, file_id="f2"),
+            ],
+            schema=ORDERS,
+        )
+        issue = next(i for i in result.issues if i.type is IssueType.IDENTITY_CONFLICT)
+        assert issue.reason.startswith("ORD-1 ")
+
+
+class TestIdentityAndDisplayAreDifferentQuestions:
+    """Conflating them is a silent bug, so the distinction is pinned.
+
+    Display prefers a person's name because that is what a reviewer recognises.
+    Anything keyed on *which record this is* — merging, and the demo's per-record
+    delivery behaviour — must use the identity field, which is only ever set
+    deliberately. Looking a record up by its display name matches nothing.
+    """
+
+    def test_the_two_fields_differ_on_the_builtin_template(self) -> None:
+        from schemabridge.domain.target import BUILTIN_SCHEMA
+
+        assert BUILTIN_SCHEMA.identity_field == "employeeId"
+        assert BUILTIN_SCHEMA.naming_field == "fullName"
+
+    def test_merging_still_keys_on_identity_not_on_the_name(self) -> None:
+        """Two people who share a name are not one record."""
+        from schemabridge.domain.target import BUILTIN_SCHEMA
+
+        result = reconcile_identities(
+            [
+                row({"employeeId": "E-1", "fullName": "Jo Smith"}),
+                row({"employeeId": "E-2", "fullName": "Jo Smith"}, number=3),
+            ],
+            schema=BUILTIN_SCHEMA,
+        )
+        assert len(result.records) == 2
+        assert result.merged_rows == 0
+
+
 class TestValidatorIsolation:
     def test_two_schemas_do_not_share_a_validator(self) -> None:
         """The cache is keyed per schema, so one contract cannot judge another."""

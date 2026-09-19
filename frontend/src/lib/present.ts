@@ -6,7 +6,14 @@
  * shows, so the wording is consistent and testable — and so nothing invents a
  * fact the backend did not report.
  */
-import type { Counters, Issue, IssueOption, MigrationRecord, Run } from "./api";
+import type {
+  Counters,
+  Issue,
+  IssueOption,
+  MigrationRecord,
+  Run,
+  TargetField,
+} from "./api";
 
 export type StageId = "read" | "match" | "check" | "send" | "done";
 export type StageState = "waiting" | "active" | "done" | "blocked";
@@ -82,7 +89,7 @@ export function stagesFor(run: Run): Stage[] {
     detail.send = `${c.delivered} of ${c.delivered + c.failed + c.retrying} sent`;
   }
   if (finished) {
-    detail.done = `${plural(c.delivered, "employee")} in the destination`;
+    detail.done = `${plural(c.delivered, "record")} in the destination`;
   }
 
   return ORDER.map((id, index) => {
@@ -124,13 +131,13 @@ export function headline(run: Run): string {
     case "review":
       return "Reviewing what was found";
     case "ready":
-      return `Getting ready to send ${plural(c.records, "employee")}`;
+      return `Getting ready to send ${plural(c.records, "record")}`;
     case "delivering":
-      return `Sending ${c.delivered + 1} of ${plural(c.records - c.excluded, "employee")}`;
+      return `Sending ${c.delivered + 1} of ${plural(c.records - c.excluded, "record")}`;
     case "complete":
-      return `${plural(c.delivered, "employee")} sent to the destination`;
+      return `${plural(c.delivered, "record")} sent to the destination`;
     case "complete_with_failures":
-      return `${plural(c.delivered, "employee")} sent, ${c.failed + c.excluded} did not go`;
+      return `${plural(c.delivered, "record")} sent, ${c.failed + c.excluded} did not go`;
   }
 }
 
@@ -167,16 +174,20 @@ export interface PresentedQuestion {
  * "VALIDATION_FAILED_TWICE" tells a consultant nothing. Everything factual —
  * the values, the reason, the options — comes straight from the API.
  */
-export function presentQuestion(issue: Issue, records: MigrationRecord[]): PresentedQuestion {
+export function presentQuestion(
+  issue: Issue,
+  records: MigrationRecord[],
+  fields: TargetField[] = [],
+): PresentedQuestion {
   const ids = new Set(issue.record_ids);
   const affected = records.filter((record) => ids.has(record.id));
-  const who = describeWho(affected);
+  const who = describeWho(affected, fields);
   const field = issue.field_label;
 
   return {
     id: issue.id,
     title: titleFor(issue, who, field),
-    subject: subjectLine(issue, affected),
+    subject: subjectLine(issue, affected, fields),
     why: issue.reason,
     fieldLabel: field,
     evidence: evidenceFor(issue, affected),
@@ -186,22 +197,39 @@ export function presentQuestion(issue: Issue, records: MigrationRecord[]): Prese
   };
 }
 
-/** The employee's name, which is what a consultant recognises. */
-function describeWho(records: MigrationRecord[]): string | null {
+/**
+ * How to name a record to a person.
+ *
+ * A name field where the schema has one, else its identifier — "Asha Rao" is
+ * what a consultant recognises, and "rec:e-1003" is not. Driven by the schema
+ * rather than by a hardcoded `fullName`, so a contract with no such field still
+ * names its records by something meaningful.
+ */
+function nameOf(record: MigrationRecord, fields: TargetField[]): string | null {
+  const naming = fields.find((field) => field.kind === "person_name");
+  const value = naming ? record.values[naming.name] : null;
+  return value || record.employee_id || null;
+}
+
+function describeWho(records: MigrationRecord[], fields: TargetField[]): string | null {
   if (records.length === 0) return null;
-  const name = records[0].values.fullName ?? records[0].employee_id;
+  const name = nameOf(records[0], fields);
   if (!name) return null;
   return records.length > 1 ? `${name} and ${records.length - 1} more` : name;
 }
 
 /** The line under the question: who or what, and where it came from. */
-function subjectLine(issue: Issue, records: MigrationRecord[]): string | null {
+function subjectLine(
+  issue: Issue,
+  records: MigrationRecord[],
+  fields: TargetField[],
+): string | null {
   if (issue.column) {
     return issue.column_file ? `“${issue.column}” in ${issue.column_file}` : `“${issue.column}”`;
   }
   const record = records[0];
   if (!record) return null;
-  const parts = [record.values.fullName, record.employee_id].filter(Boolean);
+  const parts = [nameOf(record, fields), record.employee_id].filter(Boolean);
   const head = parts.join(" · ");
   return record.sources.length > 0 ? `${head} · from ${record.sources.join(", ")}` : head || null;
 }
@@ -311,17 +339,17 @@ export function writeDate(iso: string): string {
 /**
  * The arithmetic, spelled out.
  *
- * Row counts and employee counts are different units, so they are reconciled in
+ * Row counts and record counts are different units, so they are reconciled in
  * a sentence rather than added into one total.
  */
 export function reconcile(c: Counters): string {
   if (c.merged > 0) {
     return `${plural(c.source_rows, "row")} across your files became ${plural(
       c.records,
-      "employee",
+      "record",
     )} after combining ${plural(c.merged, "duplicate row")}.`;
   }
-  return `${plural(c.source_rows, "row")} across your files became ${plural(c.records, "employee")}.`;
+  return `${plural(c.source_rows, "row")} across your files became ${plural(c.records, "record")}.`;
 }
 
 export const RECORD_STATE: Record<

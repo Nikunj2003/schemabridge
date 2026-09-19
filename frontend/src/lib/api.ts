@@ -130,6 +130,11 @@ export interface Run {
   runnable: boolean;
   active: boolean;
   files: string[];
+  /** Which contract this run was validated against. */
+  schema_name: string;
+  schema_id: string;
+  /** Its fields, so the record tables show the columns this run actually has. */
+  schema_fields: TargetField[];
   counters: Counters;
   mappings: Mapping[];
   issues: Issue[];
@@ -139,18 +144,77 @@ export interface Run {
   blocked_reason: string | null;
 }
 
+/** The six semantic kinds. Closed, because every cleanup rule keys off one. */
+export type ValueKind = "identifier" | "person_name" | "email" | "date" | "text" | "enum";
+
 export interface TargetField {
   name: string;
   label: string;
   description: string;
   required: boolean;
-  kind: string;
+  kind: ValueKind;
+  /** Keys the record on this field, so two files can describe one record. */
+  is_identity: boolean;
+  /** Two records sharing this value is worth a person's attention. */
+  is_unique: boolean;
   allowed_values: string[];
+  /**
+   * Spellings accepted for each permitted value, so "Permanent" and "full-time"
+   * can both canonicalise onto one member. Unlisted spellings escalate rather
+   * than being guessed at.
+   */
+  value_aliases: Record<string, string>;
+  /**
+   * Header spellings that will match this field, derived by the backend.
+   * Read-only: seeing that "doj" matches is what tells someone their export
+   * will work without them having to try it.
+   */
+  spellings: string[];
+  /** Names the field this one must not precede, for a date pair. */
+  not_before?: string | null;
 }
 
-export interface SchemaInfo {
+export interface TargetSchema {
+  schema_id: string;
+  name: string;
+  description: string;
+  version: number;
+  /** The shipped template: usable as a starting point, not editable in place. */
+  builtin: boolean;
   fields: TargetField[];
+  updated_at?: string;
+}
+
+export interface SchemaInfo extends TargetSchema {
   limits: Record<string, number>;
+}
+
+export interface SchemaListing {
+  builtin: TargetSchema;
+  schemas: TargetSchema[];
+  limits: { max_fields: number; max_schemas: number };
+}
+
+/** A field as the builder submits it. Derived spellings are never sent back. */
+export interface FieldInput {
+  name: string;
+  label: string;
+  description: string;
+  required: boolean;
+  kind: ValueKind;
+  is_identity: boolean;
+  is_unique: boolean;
+  enum_values: string[];
+  value_aliases: Record<string, string>;
+  not_before: string | null;
+}
+
+export interface SchemaInput {
+  name: string;
+  description: string;
+  fields: FieldInput[];
+  /** The version the editor read, so a concurrent save is refused not lost. */
+  if_version?: number;
 }
 
 /** A decision the reviewer has made about one escalation. */
@@ -204,10 +268,47 @@ export const api = {
 
   usage: () => request<{ used: number; limit: number }>("/api/usage"),
 
-  createRun: (files: File[]) => {
+  /**
+   * Start a migration.
+   *
+   * `schemaId` picks the contract: a saved schema's id, "detected" to derive one
+   * from the uploaded headers, or omitted for the built-in template.
+   */
+  createRun: (files: File[], schemaId?: string) => {
     const body = new FormData();
     for (const file of files) body.append("files", file);
+    if (schemaId) body.append("schema_id", schemaId);
     return request<Run>("/api/runs", { method: "POST", body });
+  },
+
+  schemas: {
+    list: () => request<SchemaListing>("/api/schemas"),
+
+    read: (schemaId: string) => request<TargetSchema>(`/api/schemas/${schemaId}`),
+
+    create: (schema: SchemaInput) =>
+      request<TargetSchema>("/api/schemas", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(schema),
+      }),
+
+    /** Save changes. `if_version` must be the version the editor last read. */
+    update: (schemaId: string, schema: SchemaInput) =>
+      request<TargetSchema>(`/api/schemas/${schemaId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(schema),
+      }),
+
+    remove: async (schemaId: string) => {
+      const response = await fetch(`/api/schemas/${schemaId}`, {
+        method: "DELETE",
+        credentials: "same-origin",
+      });
+      // 204 carries no body, so this one cannot go through `request`.
+      if (!response.ok) throw new ApiError(await describeError(response), response.status);
+    },
   },
 
   /** Read state. Safe to poll; never changes anything. */

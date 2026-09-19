@@ -184,6 +184,34 @@ class TargetSchema(BaseModel):
         return next((field.name for field in self.fields if field.is_identity), None)
 
     @cached_property
+    def naming_field(self) -> str | None:
+        """The field that best names a record to a person.
+
+        Not the same question as `identity_field`, which is about *merging* and is
+        only ever set deliberately. This is about display, so a reasonable guess
+        is fine and much better than the alternative: a detected schema declares
+        no identity, and falling back to an internal `rec:row-3` shows a reviewer
+        a handle they cannot find anywhere in their file.
+
+        Preference order is how recognisable each kind is: a person's name, then
+        the declared identity, then any identifier, then the first required
+        field.
+        """
+        for kind in (ValueKind.PERSON_NAME,):
+            for field in self.fields:
+                if field.kind is kind:
+                    return field.name
+        if self.identity_field:
+            return self.identity_field
+        for field in self.fields:
+            if field.kind is ValueKind.IDENTIFIER:
+                return field.name
+        for field in self.fields:
+            if field.required:
+                return field.name
+        return None
+
+    @cached_property
     def unique_fields(self) -> tuple[str, ...]:
         return tuple(field.name for field in self.fields if field.is_unique)
 

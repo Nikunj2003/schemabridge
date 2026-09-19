@@ -104,7 +104,7 @@ export function RunView({ runId }: { runId: string }) {
           <Results run={run} />
         ) : open.length > 0 ? (
           <Decision
-            question={presentQuestion(open[0], run.records)}
+            question={presentQuestion(open[0], run.records, run.schema_fields)}
             onSave={(decision) => void decide(open[0].id, decision)}
             saving={saving}
             index={answered.length}

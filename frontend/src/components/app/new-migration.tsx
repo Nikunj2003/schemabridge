@@ -1,22 +1,27 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { api } from "@/lib/api";
+import { api, type SchemaListing, type TargetSchema } from "@/lib/api";
 import { fileSize } from "@/lib/present";
-import { TARGET_FIELDS } from "@/lib/target-fields";
 import { cn } from "@/lib/utils";
 
 const ACCEPTED = [".csv", ".xlsx"];
 const MAX_FILES = 4;
 
+/** The special choice: derive a contract from the uploaded headers. */
+const DETECT = "detected";
+
 /**
  * Starting a migration.
  *
- * Not a mapping wizard: the destination is fixed and the whole point is that
- * the agent works out the columns. So this asks for files and states plainly
- * what pressing the button authorises.
+ * Two questions, in the order they actually arise: what are you migrating, and
+ * what shape does the destination want? The second has a sensible default, so
+ * someone who does not care can ignore it — but it is visible, because the
+ * previous build hid it entirely and left no way to migrate anything but
+ * employees.
  */
 export function NewMigration() {
   const router = useRouter();
@@ -25,7 +30,29 @@ export function NewMigration() {
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [listing, setListing] = useState<SchemaListing | null>(null);
+  const [choice, setChoice] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        const loaded = await api.schemas.list();
+        if (!live) return;
+        setListing(loaded);
+        // Default to the built-in template rather than to nothing, so the
+        // button is usable the moment a file is added.
+        setChoice(loaded.builtin.schema_id);
+      } catch {
+        // Not fatal: omitting the schema uses the backend's own default.
+        if (live) setListing(null);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, []);
 
   const add = (incoming: FileList | null) => {
     if (!incoming) return;
@@ -56,7 +83,7 @@ export function NewMigration() {
     setStarting(true);
     setError(null);
     try {
-      const run = await api.createRun(files);
+      const run = await api.createRun(files, choice ?? undefined);
       router.push(`/app/migrations/${run.run_id}`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "The migration could not be started.");
@@ -64,18 +91,23 @@ export function NewMigration() {
     }
   };
 
-  const required = TARGET_FIELDS.filter((field) => field.required);
+  const chosen: TargetSchema | null =
+    listing === null || choice === null || choice === DETECT
+      ? null
+      : choice === listing.builtin.schema_id
+        ? listing.builtin
+        : (listing.schemas.find((schema) => schema.schema_id === choice) ?? null);
 
   return (
     <div className="mx-auto max-w-[52rem] px-4 py-6 sm:px-8 sm:py-8">
       <h1 className="font-display text-[24px]">New migration</h1>
-      <p className="mt-1.5 text-[14px] text-ink-muted">
-        Add your employee exports. The agent works out which column means what —
-        you do not map anything by hand.
+      <p className="mt-1.5 max-w-[62ch] text-[14px] text-ink-muted">
+        Add your exports and say what the destination expects. The agent works out
+        which column means what — you do not map anything by hand.
       </p>
 
       <section className="mt-6">
-        <h2 className="text-[14px] font-semibold">Your files</h2>
+        <h2 className="text-[15px] font-semibold">1. Your files</h2>
         <p className="mt-0.5 text-[13px] text-ink-muted">
           CSV or Excel, up to {MAX_FILES} files. Use synthetic data only.
         </p>
@@ -134,35 +166,109 @@ export function NewMigration() {
         )}
 
         {notice && (
-          <p role="status" className="mt-3 rounded-md border border-attention/30 bg-attention-soft px-4 py-2.5 text-[13px] text-attention">
+          <p
+            role="status"
+            className="mt-3 rounded-md border border-attention/30 bg-attention-soft px-4 py-2.5 text-[13px] text-attention"
+          >
             {notice}
           </p>
         )}
       </section>
 
       <section className="mt-7">
-        <h2 className="text-[14px] font-semibold">Where the records go</h2>
+        <h2 className="text-[15px] font-semibold">2. What the destination expects</h2>
+        <p className="mt-0.5 max-w-[62ch] text-[13px] text-ink-muted">
+          The contract your records are mapped onto and checked against.
+        </p>
+
+        {listing === null ? (
+          <p className="panel mt-3 px-4 py-3 text-[13px] text-ink-muted">
+            Saved schemas are unavailable, so this run will use the built-in
+            employee shape.
+          </p>
+        ) : (
+          <div className="mt-3 space-y-2">
+            <SchemaOption
+              id={listing.builtin.schema_id}
+              chosen={choice}
+              onChoose={setChoice}
+              title={listing.builtin.name}
+              note="Built in"
+              detail={`${listing.builtin.fields.length} fields. A good default for employee data.`}
+            />
+
+            {listing.schemas.map((schema) => (
+              <SchemaOption
+                key={schema.schema_id}
+                id={schema.schema_id}
+                chosen={choice}
+                onChoose={setChoice}
+                title={schema.name}
+                note="Yours"
+                detail={`${schema.fields.length} fields.${
+                  schema.description ? ` ${schema.description}` : ""
+                }`}
+              />
+            ))}
+
+            <SchemaOption
+              id={DETECT}
+              chosen={choice}
+              onChoose={setChoice}
+              title="Work it out from my files"
+              detail="Builds a contract from your own headers. Nothing is marked required and no field identifies a record, so review it afterwards before relying on it."
+            />
+
+            <p className="pt-1 text-[12.5px] text-ink-muted">
+              Need a different shape?{" "}
+              <Link href="/app/schema/new" className="text-accent-ink underline">
+                Build a schema
+              </Link>
+              .
+            </p>
+          </div>
+        )}
+
+        {chosen && chosen.fields.some((field) => field.required) && (
+          <p className="mt-3 text-[12.5px] text-ink-muted">
+            Every record needs{" "}
+            {chosen.fields
+              .filter((field) => field.required)
+              .map((field) => field.label.toLowerCase())
+              .join(", ")}
+            . Anything else your files carry is matched where it fits and left out
+            where it does not.
+          </p>
+        )}
+      </section>
+
+      <section className="mt-7">
+        <h2 className="text-[15px] font-semibold">3. Where the records go</h2>
         <div className="panel mt-3 px-4 py-4">
           <p className="text-[13.5px] font-medium">Demo HR system</p>
           <p className="mt-0.5 text-[13px] text-ink-muted">
-            A simulated destination inside this app. Nothing leaves it.
-          </p>
-          <p className="mt-3 text-[12.5px] text-ink-muted">
-            Every employee needs {required.map((f) => f.label.toLowerCase()).join(", ")}.
-            Anything else your files carry is matched where it fits and left out
-            where it does not.
+            A simulated destination inside this app. Nothing leaves it, and it
+            enforces the schema you chose above.
           </p>
         </div>
       </section>
 
       {error && (
-        <p role="alert" className="mt-5 rounded-md border border-problem/30 bg-problem-soft px-4 py-3 text-[13.5px] text-problem">
+        <p
+          role="alert"
+          className="mt-5 rounded-md border border-problem/30 bg-problem-soft px-4 py-3 text-[13.5px] text-problem"
+        >
           {error}
         </p>
       )}
 
       <div className="mt-7 border-t border-line pt-5">
-        <Button variant="primary" size="lg" disabled={files.length === 0 || starting} onClick={() => void start()}>
+        <Button
+          variant="primary"
+          size="lg"
+          disabled={files.length === 0 || starting}
+          onClick={() => void start()}
+        >
           {starting ? "Starting…" : "Start migration"}
         </Button>
         <p className="mt-2.5 max-w-[56ch] text-[13px] text-ink-muted">
@@ -172,5 +278,49 @@ export function NewMigration() {
         </p>
       </div>
     </div>
+  );
+}
+
+function SchemaOption({
+  id,
+  chosen,
+  onChoose,
+  title,
+  note,
+  detail,
+}: {
+  id: string;
+  chosen: string | null;
+  onChoose: (id: string) => void;
+  title: string;
+  note?: string;
+  detail: string;
+}) {
+  const selected = chosen === id;
+  return (
+    <label
+      className={cn(
+        "flex cursor-pointer gap-3 rounded-md border px-4 py-3 transition-colors",
+        selected
+          ? "border-accent bg-accent-soft"
+          : "border-line bg-surface hover:border-line-strong",
+      )}
+    >
+      <input
+        type="radio"
+        name="schema"
+        value={id}
+        checked={selected}
+        onChange={() => onChoose(id)}
+        className="mt-1 size-4 shrink-0 accent-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
+      />
+      <span className="min-w-0">
+        <span className="flex flex-wrap items-center gap-2">
+          <span className="text-[13.5px] font-medium">{title}</span>
+          {note && <span className="text-[11.5px] text-ink-subtle">{note}</span>}
+        </span>
+        <span className="mt-0.5 block text-[12.5px] text-ink-muted">{detail}</span>
+      </span>
+    </label>
   );
 }

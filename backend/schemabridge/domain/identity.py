@@ -83,8 +83,8 @@ def _identity_key(values: dict[str, str | None], schema: TargetSchema) -> str | 
 
 
 def _subject(group: _Group, schema: TargetSchema) -> str:
-    """How to name a record to a person: its identity value, else its id."""
-    name = schema.identity_field
+    """How to name a record to a person, by whatever the schema names it best."""
+    name = schema.naming_field
     if name and (value := group.values.get(name)):
         return value
     return group.id

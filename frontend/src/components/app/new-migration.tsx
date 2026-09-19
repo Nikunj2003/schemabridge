@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/field";
+import { Select, Textarea } from "@/components/ui/field";
 import { api, type SchemaListing, type TargetSchema } from "@/lib/api";
 import { fileSize } from "@/lib/present";
 import { cn } from "@/lib/utils";
@@ -17,6 +17,9 @@ const DETECT = "detected";
 
 /** The special choice: a spec supplied for this run only, not saved. */
 const SPEC = "spec";
+
+/** The special choice: one of the account's own saved schemas, picked below. */
+const SAVED = "saved";
 
 /**
  * Starting a migration.
@@ -36,6 +39,7 @@ export function NewMigration() {
   const [starting, setStarting] = useState(false);
   const [listing, setListing] = useState<SchemaListing | null>(null);
   const [choice, setChoice] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string>("");
   const [spec, setSpec] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -90,7 +94,7 @@ export function NewMigration() {
     try {
       const run = await api.createRun(
         files,
-        choice === SPEC ? undefined : (choice ?? undefined),
+        choice === SPEC ? undefined : (choice === SAVED ? saved : (choice ?? undefined)),
         choice === SPEC ? spec : undefined,
       );
       router.push(`/app/migrations/${run.run_id}`);
@@ -100,12 +104,19 @@ export function NewMigration() {
     }
   };
 
+  const savedSchema: TargetSchema | null =
+    listing?.schemas.find((schema) => schema.schema_id === saved) ?? null;
+
+  // The schema whose required fields are worth naming below. Null for the two
+  // choices whose shape is not known until the run starts.
   const chosen: TargetSchema | null =
-    listing === null || choice === null || choice === DETECT
+    listing === null || choice === null || choice === DETECT || choice === SPEC
       ? null
-      : choice === listing.builtin.schema_id
-        ? listing.builtin
-        : (listing.schemas.find((schema) => schema.schema_id === choice) ?? null);
+      : choice === SAVED
+        ? savedSchema
+        : choice === listing.builtin.schema_id
+          ? listing.builtin
+          : null;
 
   return (
     <div className="mx-auto max-w-[52rem] px-4 py-6 sm:px-8 sm:py-8">
@@ -206,19 +217,42 @@ export function NewMigration() {
               detail={`${listing.builtin.fields.length} fields. A good default for employee data.`}
             />
 
-            {listing.schemas.map((schema) => (
+            {/* One option for every saved schema rather than a radio each: the
+                list grows per client, and twenty radios would bury the two
+                choices that are not a saved schema. Absent entirely when there
+                are none, so it is never an empty control. */}
+            {listing.schemas.length > 0 && (
               <SchemaOption
-                key={schema.schema_id}
-                id={schema.schema_id}
+                id={SAVED}
                 chosen={choice}
-                onChoose={setChoice}
-                title={schema.name}
-                note="Yours"
-                detail={`${schema.fields.length} fields.${
-                  schema.description ? ` ${schema.description}` : ""
-                }`}
-              />
-            ))}
+                onChoose={(id) => {
+                  setChoice(id);
+                  // Selecting the group with nothing picked would leave the run
+                  // with no schema, so default to the most recently changed.
+                  if (!saved) setSaved(listing.schemas[0].schema_id);
+                }}
+                title="One of my schemas"
+                note={`${listing.schemas.length} saved`}
+                detail="A contract you built or imported here."
+              >
+                <Select
+                  aria-label="Which of your schemas"
+                  value={saved}
+                  onChange={(event) => setSaved(event.target.value)}
+                >
+                  {listing.schemas.map((schema) => (
+                    <option key={schema.schema_id} value={schema.schema_id}>
+                      {schema.name} — {schema.fields.length} fields
+                    </option>
+                  ))}
+                </Select>
+                {savedSchema?.description && (
+                  <p className="mt-2 text-[12.5px] text-ink-muted">
+                    {savedSchema.description}
+                  </p>
+                )}
+              </SchemaOption>
+            )}
 
             <SchemaOption
               id={SPEC}
@@ -292,7 +326,12 @@ export function NewMigration() {
         <Button
           variant="primary"
           size="lg"
-          disabled={files.length === 0 || starting || (choice === SPEC && !spec.trim())}
+          disabled={
+            files.length === 0 ||
+            starting ||
+            (choice === SPEC && !spec.trim()) ||
+            (choice === SAVED && !saved)
+          }
           onClick={() => void start()}
         >
           {starting ? "Starting…" : "Start migration"}

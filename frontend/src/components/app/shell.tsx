@@ -43,7 +43,9 @@ export function AppShell({
     // cannot travel off the top of the viewport.
     <div className="flex h-dvh overflow-hidden bg-canvas">
       <aside className="hidden w-[228px] shrink-0 flex-col border-r border-line bg-surface md:flex">
-        <div className="flex h-14 shrink-0 items-center px-4">
+        {/* Same height and bottom border as the header, so the rule runs
+            unbroken across the full width instead of stopping at the rail. */}
+        <div className="flex h-14 shrink-0 items-center border-b border-line px-4">
           <Link href="/app" className="rounded-md">
             <Wordmark />
           </Link>

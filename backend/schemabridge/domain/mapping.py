@@ -196,8 +196,8 @@ def decide_mappings(
     for key, competing in contention.items():
         if len(competing) < 2:
             continue
-        target = TargetField(key.split(":", 1)[1])
-        spec = get_field(target.value)
+        target = key.split(":", 1)[1]
+        spec = get_field(target)
         assert spec is not None
         headers = ", ".join(f'"{c.header}"' for c in competing)
         issues.append(
@@ -210,7 +210,7 @@ def decide_mappings(
                     f"not say which."
                 ),
                 blocking=spec.required,
-                field_name=target.value,
+                field_name=target,
                 options=tuple(
                     IssueOption(
                         id=f"use:{c.id}",

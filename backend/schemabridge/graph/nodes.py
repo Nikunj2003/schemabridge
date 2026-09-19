@@ -36,7 +36,7 @@ from schemabridge.domain.models import (
     RunPhase,
     ValidationError,
 )
-from schemabridge.domain.target import TARGET_FIELDS, TargetField, get_field
+from schemabridge.domain.target import TARGET_FIELDS, get_field
 from schemabridge.domain.validate import run_validation_passes
 from schemabridge.graph.state import MigrationState, next_sequence
 from schemabridge.server.target_client import (
@@ -92,14 +92,14 @@ def propose_mappings(state: MigrationState) -> dict[str, Any]:
         header = column.header if column else decision.column_id
 
         if decision.outcome is MappingOutcome.AUTO_MAPPED and decision.target:
-            spec = get_field(decision.target.value)
+            spec = get_field(decision.target)
             events.append(
                 _event(
                     seq,
                     "mapping_applied",
                     decision.evidence[0] if decision.evidence else "Deterministic match.",
                     subject=header,
-                    after=spec.label if spec else decision.target.value,
+                    after=spec.label if spec else decision.target,
                     basis=decision.basis.value,
                 )
             )
@@ -149,7 +149,7 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
     columns = list(state.get("columns", ()))
     profiles = {profile.column_id: profile for profile in state.get("profiles", ())}
     taken = {
-        decision.target.value
+        decision.target
         for decision in state.get("mappings", ())
         if decision.outcome is MappingOutcome.AUTO_MAPPED and decision.target
     }
@@ -162,13 +162,16 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
     events: list[AuditEvent] = []
 
     for accepted in outcome.accepted:
-        target = TargetField(accepted.target)
+        # No enum reconstruction here: the name came from the run's schema, which
+        # is chosen per run, so TargetField(...) would raise for anything outside
+        # the built-in template. The verification gate in `check_proposed_mapping`
+        # is what guarantees the name is real.
         spec = get_field(accepted.target)
         header = by_id[accepted.column_id].header
         added.append(
             MappingDecision(
                 column_id=accepted.column_id,
-                target=target,
+                target=accepted.target,
                 outcome=MappingOutcome.AUTO_MAPPED,
                 basis=MappingBasis.MODEL_ASSISTED,
                 evidence=accepted.evidence,
@@ -281,7 +284,7 @@ def _issue_payload(issue: ReviewIssue) -> dict[str, Any]:
                 "id": option.id,
                 "label": option.label,
                 "detail": option.detail,
-                "target": option.target.value if option.target else None,
+                "target": option.target,
                 "value": option.value,
             }
             for option in issue.options
@@ -394,8 +397,8 @@ def apply_resolutions(state: MigrationState) -> dict[str, Any]:
         if option and option.target:
             column_id = issue.column_id or option_id.removeprefix("use:")
             if column_id in columns:
-                spec = get_field(option.target.value)
-                label = spec.label if spec else option.target.value
+                spec = get_field(option.target)
+                label = spec.label if spec else option.target
                 added.append(
                     MappingDecision(
                         column_id=column_id,
@@ -413,7 +416,7 @@ def apply_resolutions(state: MigrationState) -> dict[str, Any]:
                         f"Reviewer mapped this column to {label}.",
                         actor=Actor.REVIEWER,
                         subject=columns[column_id].header,
-                        after=option.target.value,
+                        after=option.target,
                     )
                 )
                 seq += 1
@@ -426,9 +429,9 @@ def apply_resolutions(state: MigrationState) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _accepted_targets(state: MigrationState) -> dict[str, TargetField]:
-    """Column to target, with reviewer corrections taking precedence."""
-    accepted: dict[str, TargetField] = {}
+def _accepted_targets(state: MigrationState) -> dict[str, str]:
+    """Column to target field name, with reviewer corrections taking precedence."""
+    accepted: dict[str, str] = {}
     for decision in state.get("mappings", ()):
         if decision.outcome is MappingOutcome.AUTO_MAPPED and decision.target:
             accepted[decision.column_id] = decision.target
@@ -446,7 +449,7 @@ def reconcile(state: MigrationState) -> dict[str, Any]:
         values: dict[str, str | None] = {}
         for column_id, raw in row.values.items():
             if target := targets.get(column_id):
-                values[target.value] = raw
+                values[target] = raw
         source = files.get(row.file_id)
         incoming.append(
             IncomingRow(

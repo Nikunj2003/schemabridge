@@ -23,11 +23,11 @@ from schemabridge.domain.models import (
     RunPhase,
     SourceColumn,
     SourceRow,
-    TargetField,
-    ValidationPassLabel,
     ValidationError,
     ValidationPass,
+    ValidationPassLabel,
 )
+from schemabridge.domain.target import TargetField
 
 
 def _column(index: int, header: str) -> SourceColumn:

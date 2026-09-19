@@ -74,7 +74,7 @@ def project(sources: list[Loaded], decisions: tuple[MappingDecision, ...]) -> li
             values: dict[str, str | None] = {}
             for column_id, raw in row.values.items():
                 if target := target_by_column.get(column_id):
-                    values[target.value] = raw
+                    values[target] = raw
             projected.append(
                 IncomingRow(
                     values=values,
@@ -140,7 +140,7 @@ class TestMessyMultiFileMigration:
         assert issue.type is IssueType.AMBIGUOUS_MAPPING
         assert issue.blocking
         offered = {o.target for o in issue.options if o.target}
-        assert {"startDate", "endDate"} <= {t.value for t in offered}
+        assert {"startDate", "endDate"} <= offered
         assert "could be" in issue.reason.lower()
 
     def test_escalates_only_what_is_genuinely_ambiguous(

@@ -12,7 +12,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from schemabridge.domain.target import TargetField, ValueKind
+from schemabridge.domain.target import ValueKind
 
 
 def utc_now() -> datetime:
@@ -122,10 +122,16 @@ class Actor(StrEnum):
 
 
 class MappingCandidate(Frozen):
-    """One candidate pairing of a source column with a target field."""
+    """One candidate pairing of a source column with a target field.
+
+    `target` is a plain field name rather than an enum member: the target schema
+    is chosen per run, so the set of valid names is not known until then. The
+    built-in template's names are still available as `TargetField` constants, and
+    since that is a `StrEnum` a comparison against one keeps working.
+    """
 
     column_id: str
-    target: TargetField
+    target: str
     basis: MappingBasis
     #: Human-readable evidence. Deliberately not a single score: the reviewer
     #: needs to see why, and a model's self-reported confidence is not a
@@ -136,7 +142,8 @@ class MappingCandidate(Frozen):
 
 class MappingDecision(Frozen):
     column_id: str
-    target: TargetField | None = None
+    #: A target field name from the run's schema, or None when nothing fits.
+    target: str | None = None
     outcome: MappingOutcome
     basis: MappingBasis
     evidence: tuple[str, ...] = ()
@@ -238,7 +245,8 @@ class IssueOption(Frozen):
     id: str
     label: str
     detail: str
-    target: TargetField | None = None
+    #: The target field this option would map to, when that is what it decides.
+    target: str | None = None
     value: str | None = None
 
 

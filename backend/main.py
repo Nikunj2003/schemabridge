@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from schemabridge import __version__
+from schemabridge.api.mock_target import router as mock_target_router
 from schemabridge.server.config import get_settings
 
 app = FastAPI(
@@ -27,6 +28,9 @@ app = FastAPI(
     swagger_ui_oauth2_redirect_url="/api/docs/oauth2-redirect",
     redoc_url=None,
 )
+
+
+app.include_router(mock_target_router)
 
 
 @app.get("/api/health")

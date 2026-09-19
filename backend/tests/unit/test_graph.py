@@ -53,7 +53,41 @@ def initial_state(names: list[str]) -> dict[str, Any]:
 
 
 @pytest.fixture
-def graph() -> Any:
+def graph(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """The workflow with delivery stubbed at the HTTP boundary.
+
+    These tests are about the graph's routing and escalation behaviour, so the
+    network is replaced by an in-process double. Delivery itself — idempotency,
+    retries, lost responses — is covered against a real server in
+    `tests/integration/test_delivery.py`, where it belongs.
+    """
+    from schemabridge.domain.models import DeliveryOutcome, DeliveryState
+    from schemabridge.graph import nodes
+    from schemabridge.server.target_client import DeliveryResult
+
+    class _NoNetwork:
+        def __enter__(self) -> _NoNetwork:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    def accept_everything(
+        _client: object,
+        _run_id: str,
+        record: Any,
+        **_kwargs: Any,
+    ) -> DeliveryResult:
+        return DeliveryResult(
+            outcome=DeliveryOutcome.SUCCEEDED,
+            state=DeliveryState.SUCCEEDED,
+            status_code=201,
+            detail="Accepted by the destination.",
+            target_id=f"DEST-{record.id[-6:].upper()}",
+        )
+
+    monkeypatch.setattr(nodes, "build_client", lambda: _NoNetwork())
+    monkeypatch.setattr(nodes, "deliver_record", accept_everything)
     return compile_graph(InMemorySaver())
 
 
@@ -63,9 +97,11 @@ class TestCleanRunNeedsNoHuman:
         result = graph.invoke(initial_state(["employees-clean.csv"]), config)
 
         assert "__interrupt__" not in result
-        assert result["phase"] is RunPhase.READY
-        assert all(r.disposition is Disposition.READY for r in result["records"])
+        # Reaching the end means delivery ran on its own: no second approval.
+        assert result["phase"] is RunPhase.COMPLETE
+        assert all(r.disposition is Disposition.DELIVERED for r in result["records"])
         assert result["issues"] == ()
+        assert len(result["deliveries"]) == len(result["records"])
 
     def test_records_what_it_did(self, graph: Any) -> None:
         config = {"configurable": {"thread_id": "clean-2"}}
@@ -75,6 +111,7 @@ class TestCleanRunNeedsNoHuman:
         assert "mapping_applied" in actions
         assert "records_reconciled" in actions
         assert "validation_summary" in actions
+        assert "delivery_succeeded" in actions
         # Sequence numbers are the UI's polling cursor, so they must be unique.
         seqs = [e.seq for e in result["events"]]
         assert len(seqs) == len(set(seqs))
@@ -214,7 +251,8 @@ class TestResolutionsStick:
         assert not resumed.get("__interrupt__"), "issues reopened after being resolved"
         final = graph.get_state(config).values
         assert all(i.status is IssueStatus.RESOLVED for i in final["issues"])
-        assert final["phase"] is RunPhase.READY
+        # Once nothing is blocking, the run finishes without further prompting.
+        assert final["phase"] in {RunPhase.COMPLETE, RunPhase.COMPLETE_WITH_FAILURES}
 
     def test_excluded_records_are_still_accounted_for(self, graph: Any) -> None:
         config = {"configurable": {"thread_id": "sticky-2"}}

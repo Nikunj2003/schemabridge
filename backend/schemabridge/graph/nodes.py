@@ -20,6 +20,8 @@ from schemabridge.domain.models import (
     Actor,
     AuditEvent,
     CanonicalRecord,
+    DeliveryIntent,
+    DeliveryState,
     Disposition,
     IssueOption,
     IssueResolution,
@@ -37,6 +39,15 @@ from schemabridge.domain.models import (
 from schemabridge.domain.target import TARGET_FIELDS, TargetField, get_field
 from schemabridge.domain.validate import run_validation_passes
 from schemabridge.graph.state import MigrationState, next_sequence
+from schemabridge.server.target_client import (
+    MAX_ATTEMPTS,
+    attempt_record,
+    build_client,
+    build_payload,
+    deliver_record,
+    idempotency_key,
+    payload_hash,
+)
 
 
 def _event(
@@ -651,3 +662,162 @@ def clean_and_validate(state: MigrationState) -> dict[str, Any]:
     )
 
     return {"records": tuple(validated), "issues": tuple(issues), "events": tuple(events)}
+
+
+# ---------------------------------------------------------------------------
+# Delivery
+# ---------------------------------------------------------------------------
+
+
+def deliver(state: MigrationState) -> dict[str, Any]:
+    """Push validated records to the destination over real HTTP.
+
+    Records are delivered one at a time so a failure is attributable to a
+    specific record rather than a batch. Each attempt is recorded before the
+    outcome is known, which is what makes recovery possible: if this process dies
+    mid-flight, the persisted intent tells the next one what was already in
+    progress, and the idempotency key ensures replaying it cannot duplicate.
+    """
+    run_id = state.get("run_id", "run")
+    records = state.get("records", ())
+    existing = {intent.record_id: intent for intent in state.get("deliveries", ())}
+    demo_config = state.get("demo_delivery", {}) or {}
+
+    deliverable = [
+        record
+        for record in records
+        if record.disposition in {Disposition.READY, Disposition.RETRY_WAIT}
+        or (
+            record.disposition is Disposition.FAILED
+            and existing.get(record.id) is not None
+            and existing[record.id].state is DeliveryState.RETRY_WAIT
+        )
+    ]
+
+    if not deliverable:
+        return {"phase": _final_phase(records, tuple(existing.values()))}
+
+    seq = next_sequence(state)
+    intents: list[DeliveryIntent] = []
+    events: list[AuditEvent] = []
+    updated: dict[str, CanonicalRecord] = {}
+
+    with build_client() as client:
+        for record in deliverable:
+            prior = existing.get(record.id)
+            attempt_number = len(prior.attempts) + 1 if prior else 1
+            if attempt_number > MAX_ATTEMPTS:
+                continue
+
+            employee_id = record.values.get("employeeId") or record.id
+            payload = build_payload(record)
+            digest = payload_hash(payload)
+            key = idempotency_key(run_id, record)
+
+            events.append(
+                _event(
+                    seq,
+                    "delivery_attempted",
+                    f"Sending to the destination (attempt {attempt_number}).",
+                    subject=employee_id,
+                    attempt=attempt_number,
+                )
+            )
+            seq += 1
+
+            # Per-record demo behaviour, configured by the run rather than
+            # inferred from the data, so production logic has no test branches.
+            demo_headers: dict[str, str] = {}
+            behaviour = demo_config.get(employee_id)
+            if behaviour == "fail_once" and attempt_number == 1:
+                demo_headers["x-demo-fail-once"] = "1"
+            elif behaviour == "reject":
+                demo_headers["x-demo-reject"] = "1"
+
+            result = deliver_record(
+                client,
+                run_id,
+                record,
+                request_origin=state.get("request_origin"),
+                attempt_number=attempt_number,
+                demo_headers=demo_headers or None,
+            )
+
+            attempts = (*(prior.attempts if prior else ()), attempt_record(result, attempt_number))
+            intents.append(
+                DeliveryIntent(
+                    record_id=record.id,
+                    revision=record.revision,
+                    idempotency_key=key,
+                    payload_hash=digest,
+                    attempts=attempts,
+                    state=result.state,
+                    target_id=result.target_id,
+                    next_attempt_at=result.next_attempt_at,
+                )
+            )
+
+            if result.state is DeliveryState.SUCCEEDED:
+                disposition = Disposition.DELIVERED
+                action = "delivery_succeeded"
+            elif result.state is DeliveryState.RETRY_WAIT:
+                disposition = Disposition.RETRY_WAIT
+                action = "delivery_retry_scheduled"
+            else:
+                disposition = Disposition.FAILED
+                action = "delivery_failed"
+
+            updated[record.id] = record.model_copy(update={"disposition": disposition})
+            events.append(
+                _event(
+                    seq,
+                    action,
+                    result.detail,
+                    subject=employee_id,
+                    after=result.target_id,
+                    status=result.status_code,
+                    attempt=attempt_number,
+                )
+            )
+            seq += 1
+
+    merged_records = tuple(updated.get(record.id, record) for record in records)
+    all_intents = tuple({**existing, **{i.record_id: i for i in intents}}.values())
+
+    delivered = sum(1 for i in all_intents if i.state is DeliveryState.SUCCEEDED)
+    failed = sum(1 for i in all_intents if i.state is DeliveryState.FAILED)
+    waiting = sum(1 for i in all_intents if i.state is DeliveryState.RETRY_WAIT)
+
+    summary = f"{delivered} delivered, {failed} failed"
+    if waiting:
+        summary += f", {waiting} awaiting retry"
+    events.append(
+        _event(
+            seq,
+            "delivery_summary",
+            summary + ".",
+            delivered=delivered,
+            failed=failed,
+            retrying=waiting,
+        )
+    )
+
+    return {
+        "records": merged_records,
+        "deliveries": tuple(intents),
+        "events": tuple(events),
+        "phase": _final_phase(merged_records, all_intents),
+    }
+
+
+def _final_phase(
+    records: tuple[CanonicalRecord, ...], intents: tuple[DeliveryIntent, ...]
+) -> RunPhase:
+    """Where the run stands once delivery has run."""
+    if any(intent.state is DeliveryState.RETRY_WAIT for intent in intents):
+        return RunPhase.DELIVERING
+    if any(intent.state is DeliveryState.FAILED for intent in intents):
+        return RunPhase.COMPLETE_WITH_FAILURES
+    if any(record.disposition is Disposition.NEEDS_REVIEW for record in records):
+        return RunPhase.REVIEW
+    return RunPhase.COMPLETE

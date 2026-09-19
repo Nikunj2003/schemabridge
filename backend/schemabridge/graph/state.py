@@ -126,6 +126,12 @@ class MigrationState(TypedDict, total=False):
     blocked_reason: str | None
     #: Upstream model requests already spent, enforced against the budget.
     model_requests: int
+    #: Origin for outbound delivery, captured from the serving request when no
+    #: fixed origin is configured. Never taken from a client-supplied header.
+    request_origin: str | None
+    #: Per-employee demo behaviour for the destination stub, keyed by employee
+    #: id. Configured by the run so production logic carries no test branches.
+    demo_delivery: dict[str, str]
 
 
 def next_sequence(state: MigrationState) -> int:

@@ -14,12 +14,13 @@ from typing import Literal
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from schemabridge.domain.models import Disposition, IssueStatus, RunPhase
+from schemabridge.domain.models import IssueStatus
 from schemabridge.graph.nodes import (
     apply_resolutions,
     assist_with_model,
     await_review,
     clean_and_validate,
+    deliver,
     propose_mappings,
     reconcile,
 )
@@ -43,16 +44,6 @@ def route_after_review(
     return "apply_resolutions" if state.get("resolutions") else "deliver"
 
 
-def placeholder_deliver(state: MigrationState) -> dict[str, object]:
-    """Delivery lands in the next milestone.
-
-    Until then the graph completes so the workflow is exercisable end to end,
-    with the phase reflecting that nothing has actually been pushed.
-    """
-    ready = sum(1 for record in state.get("records", ()) if record.disposition is Disposition.READY)
-    return {"phase": RunPhase.READY if ready else RunPhase.REVIEW}
-
-
 def build_graph() -> StateGraph[MigrationState, None, MigrationState, MigrationState]:
     """Wire the nodes together. Compilation needs a checkpointer supplied."""
     graph: StateGraph[MigrationState, None, MigrationState, MigrationState] = StateGraph(
@@ -65,7 +56,7 @@ def build_graph() -> StateGraph[MigrationState, None, MigrationState, MigrationS
     graph.add_node("clean_and_validate", clean_and_validate)
     graph.add_node("await_review", await_review)
     graph.add_node("apply_resolutions", apply_resolutions)
-    graph.add_node("deliver", placeholder_deliver)
+    graph.add_node("deliver", deliver)
 
     graph.add_edge(START, "propose_mappings")
     graph.add_edge("propose_mappings", "assist_with_model")

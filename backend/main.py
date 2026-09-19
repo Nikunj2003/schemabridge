@@ -22,6 +22,10 @@ app = FastAPI(
     ),
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
+    # Both of these default to paths outside /api, which the platform routes to
+    # the frontend instead — they would 404. Redoc is not needed at all.
+    swagger_ui_oauth2_redirect_url="/api/docs/oauth2-redirect",
+    redoc_url=None,
 )
 
 

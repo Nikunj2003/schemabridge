@@ -36,3 +36,18 @@ def test_routes_are_namespaced_under_api() -> None:
     paths = [r.path for r in app.routes if hasattr(r, "path")]
     assert "/api/health" in paths
     assert "/health" not in paths
+
+
+def test_every_route_lives_under_api() -> None:
+    """The frontend catch-all owns everything outside /api.
+
+    A route declared outside that prefix is routed to the UI and 404s, so this
+    guards against adding one by accident — including the docs helper paths
+    FastAPI mounts at the root by default.
+    """
+    stray = [
+        route.path
+        for route in app.routes
+        if hasattr(route, "path") and not route.path.startswith("/api")
+    ]
+    assert stray == [], f"routes unreachable behind the frontend catch-all: {stray}"

@@ -17,6 +17,7 @@ from langgraph.graph.state import CompiledStateGraph
 from schemabridge.domain.models import Disposition, IssueStatus, RunPhase
 from schemabridge.graph.nodes import (
     apply_resolutions,
+    assist_with_model,
     await_review,
     clean_and_validate,
     propose_mappings,
@@ -59,6 +60,7 @@ def build_graph() -> StateGraph[MigrationState, None, MigrationState, MigrationS
     )
 
     graph.add_node("propose_mappings", propose_mappings)
+    graph.add_node("assist_with_model", assist_with_model)
     graph.add_node("reconcile", reconcile)
     graph.add_node("clean_and_validate", clean_and_validate)
     graph.add_node("await_review", await_review)
@@ -66,7 +68,8 @@ def build_graph() -> StateGraph[MigrationState, None, MigrationState, MigrationS
     graph.add_node("deliver", placeholder_deliver)
 
     graph.add_edge(START, "propose_mappings")
-    graph.add_edge("propose_mappings", "reconcile")
+    graph.add_edge("propose_mappings", "assist_with_model")
+    graph.add_edge("assist_with_model", "reconcile")
     graph.add_edge("reconcile", "clean_and_validate")
 
     graph.add_conditional_edges("clean_and_validate", route_after_validation)

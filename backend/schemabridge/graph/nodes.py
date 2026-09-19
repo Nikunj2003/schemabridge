@@ -13,6 +13,7 @@ from typing import Any
 
 from langgraph.types import interrupt
 
+from schemabridge.agent.propose import propose_unresolved_mappings
 from schemabridge.domain.identity import IncomingRow, reconcile_identities
 from schemabridge.domain.mapping import POLICY_VERSION, decide_mappings
 from schemabridge.domain.models import (
@@ -33,7 +34,7 @@ from schemabridge.domain.models import (
     RunPhase,
     ValidationError,
 )
-from schemabridge.domain.target import TargetField, get_field
+from schemabridge.domain.target import TARGET_FIELDS, TargetField, get_field
 from schemabridge.domain.validate import run_validation_passes
 from schemabridge.graph.state import MigrationState, next_sequence
 
@@ -120,6 +121,132 @@ def propose_mappings(state: MigrationState) -> dict[str, Any]:
         "events": tuple(events),
         "phase": RunPhase.ANALYZING,
         "policy_version": POLICY_VERSION,
+    }
+
+
+def assist_with_model(state: MigrationState) -> dict[str, Any]:
+    """Ask the model about columns the alias tables could not place.
+
+    Runs only when there is something genuinely unfamiliar, so a clean upload
+    never spends a request. Whatever comes back is verified before it is applied,
+    and failure degrades to review rather than stopping the run.
+    """
+    unresolved = list(state.get("unresolved_columns", ()))
+    if not unresolved:
+        return {}
+
+    columns = list(state.get("columns", ()))
+    profiles = {profile.column_id: profile for profile in state.get("profiles", ())}
+    taken = {
+        decision.target.value
+        for decision in state.get("mappings", ())
+        if decision.outcome is MappingOutcome.AUTO_MAPPED and decision.target
+    }
+
+    outcome = propose_unresolved_mappings(columns, profiles, unresolved, taken)
+
+    seq = next_sequence(state)
+    by_id = {column.id: column for column in columns}
+    added: list[MappingDecision] = []
+    events: list[AuditEvent] = []
+
+    for accepted in outcome.accepted:
+        target = TargetField(accepted.target)
+        spec = get_field(accepted.target)
+        header = by_id[accepted.column_id].header
+        added.append(
+            MappingDecision(
+                column_id=accepted.column_id,
+                target=target,
+                outcome=MappingOutcome.AUTO_MAPPED,
+                basis=MappingBasis.MODEL_ASSISTED,
+                evidence=accepted.evidence,
+            )
+        )
+        events.append(
+            _event(
+                seq,
+                "mapping_applied",
+                accepted.evidence[-1] if accepted.evidence else "Model suggestion, verified.",
+                subject=header,
+                after=spec.label if spec else accepted.target,
+                basis=MappingBasis.MODEL_ASSISTED.value,
+            )
+        )
+        seq += 1
+
+    for column_id, why in outcome.rejected:
+        header = by_id[column_id].header if column_id in by_id else column_id
+        events.append(
+            _event(
+                seq,
+                "mapping_suggestion_rejected",
+                why,
+                subject=header,
+            )
+        )
+        seq += 1
+
+    if outcome.unavailable_reason:
+        events.append(
+            _event(
+                seq,
+                "model_unavailable",
+                outcome.unavailable_reason,
+                actor=Actor.SYSTEM,
+                columns=len(outcome.considered),
+            )
+        )
+        seq += 1
+
+    # Columns the model also could not place stay unresolved, and are escalated
+    # as "no target field matches" rather than quietly dropped.
+    resolved_ids = {accepted.column_id for accepted in outcome.accepted}
+    still_unresolved = tuple(cid for cid in unresolved if cid not in resolved_ids)
+
+    issues: list[ReviewIssue] = []
+    for column_id in still_unresolved:
+        column = by_id.get(column_id)
+        if column is None:
+            continue
+        issues.append(
+            ReviewIssue(
+                id=f"issue:unknown:{column_id}",
+                type=IssueType.AMBIGUOUS_MAPPING,
+                reason=(
+                    f'"{column.header}" in {column.file_name} does not match any target '
+                    f"field, and could not be placed confidently. Choose a field for it "
+                    f"or leave it out."
+                ),
+                # Optional information we cannot place should not block delivery.
+                blocking=False,
+                column_id=column_id,
+                options=(
+                    *[
+                        IssueOption(
+                            id=f"map:{spec.name.value}",
+                            label=f"Map to {spec.label}",
+                            detail=f'Treat "{column.header}" as {spec.description}',
+                            target=spec.name,
+                        )
+                        for spec in TARGET_FIELDS
+                        if spec.name.value not in taken
+                    ],
+                    IssueOption(
+                        id="ignore",
+                        label="Ignore this column",
+                        detail=f'Leave "{column.header}" out of the migration.',
+                    ),
+                ),
+            )
+        )
+
+    return {
+        "mappings": tuple(added),
+        "issues": tuple(issues),
+        "unresolved_columns": still_unresolved,
+        "events": tuple(events),
+        "model_requests": state.get("model_requests", 0) + outcome.requests_used,
     }
 
 

@@ -86,21 +86,40 @@ reviewer-facing projection, delivery receipts, sessions and usage budgets.
 | UI | Next.js 16 (App Router), React 19, TypeScript, Tailwind v4 |
 | API | FastAPI, Python 3.12, Pydantic |
 | Orchestration | LangGraph with the MongoDB checkpointer |
-| Model | NVIDIA-hosted `nemotron-3.5-lightning-30b-a3b` (open weights) |
+| Model | Open-weights, via an OpenAI-compatible endpoint (see below) |
 | Data | pandas (profiling), openpyxl (Excel), jsonschema (target contract) |
 | Database | MongoDB Atlas |
 | Tests | pytest, ruff, mypy (strict) |
 
-**On the model:** an open-weights model under the NVIDIA Nemotron open model
-licence — open weights, which is not the same as an OSI-approved licence. It is
-called through an OpenAI-compatible endpoint behind an adapter, so the
-deployment can point at whichever approved model a given environment allows.
+### On the model
 
-Reasoning is explicitly disabled (`reasoning_budget: 0`) and structured output
-pinned to `method="json_schema", strict=True`. Both were chosen from
-measurement: with reasoning left on, schema-constrained requests exceeded 45s
-and returned nothing; the default structured-output strategy took twice as long
-as the pinned one, and the function-calling strategy silently returned nulls.
+Set `NVIDIA_MODEL` to any OpenAI-compatible open-weights model. Two are tested:
+
+| Model | Licence | Measured |
+| --- | --- | --- |
+| `openai/gpt-oss-20b` (default) | Apache-2.0 | ~2–11s for a schema-constrained reply |
+| `nvidia/nemotron-3.5-lightning-30b-a3b` | NVIDIA open model licence | 17s when idle, 75s when the free endpoint is busy |
+
+Switching is a one-line change with no code edit, which matters more than it
+sounds: free endpoints fluctuate hard. The same Nemotron endpoint answered a
+bare ping in 17s one hour and 75s the next. The adapter sends the switches both
+families use and sizes the output ceiling per family, so either works unchanged.
+
+Three settings come from measurement rather than documentation:
+
+- **Reasoning is minimised.** With it left on, schema-constrained requests
+  exceeded 45s and returned nothing usable, having spent the whole token budget
+  thinking. At low effort the same request answers in about 11s.
+- **Output headroom is generous.** A reasoning model emits its thinking first, so
+  at 300 tokens gpt-oss returned *only* reasoning and no answer at all.
+- **Structured output is pinned** to `json_schema` with `strict=True`. Of the
+  four available strategies, the default took twice as long, `json_mode` timed
+  out, and `function_calling` returned a null target *without raising* — which
+  would have written nulls into mappings instead of failing visibly.
+
+If the endpoint is slow or unavailable, the run does not fail: deterministic
+mappings still apply, and the columns the model was meant to help with stay in
+the review queue with the reason shown. A visible gap beats a confident guess.
 
 ## Setup
 

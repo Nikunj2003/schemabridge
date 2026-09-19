@@ -1,0 +1,228 @@
+"""Saved target schemas, as the browser sees them.
+
+The built-in template is served alongside a visitor's own schemas but is not
+stored for them: it is read-only, and editing it means saving a copy. That keeps
+one shipped definition rather than a seeded row per session that drifts as the
+template changes.
+
+A schema is validated on the way in by constructing a `TargetSchema`, so the
+model's own rules — one identity field, no duplicate names, an enum needs values,
+a date pair must reference a field that exists — are what the API enforces. There
+is no second validation layer here to disagree with the first.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Request, Response, status
+from pydantic import BaseModel, ValidationError
+
+from schemabridge.api.views import target_schema_view
+from schemabridge.domain.schema import MAX_FIELDS, TargetFieldSpec, TargetSchema, ValueKind
+from schemabridge.domain.target import BUILTIN_SCHEMA
+from schemabridge.server import schemas as store
+from schemabridge.server.sessions import ensure_session, read_session
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/schemas", tags=["schemas"])
+
+
+class FieldInput(BaseModel):
+    """One field as the builder submits it.
+
+    Mirrors `TargetFieldSpec` rather than reusing it, so a request cannot set
+    things the builder has no business setting — `aliases` in particular, which
+    are derived, not supplied.
+    """
+
+    name: str
+    label: str = ""
+    description: str = ""
+    required: bool = False
+    kind: ValueKind = ValueKind.TEXT
+    is_identity: bool = False
+    is_unique: bool = False
+    enum_values: list[str] = []
+    value_aliases: dict[str, str] = {}
+    not_before: str | None = None
+
+
+class SchemaInput(BaseModel):
+    name: str
+    description: str = ""
+    fields: list[FieldInput]
+    #: The version the editor last read. Required on a save so a concurrent edit
+    #: cannot be silently discarded.
+    if_version: int | None = None
+
+
+def _build(payload: SchemaInput, schema_id: str, version: int) -> TargetSchema:
+    """Turn a submission into a schema, or explain why it is not one."""
+    if not payload.name.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Give the schema a name."
+        )
+    if len(payload.fields) > MAX_FIELDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"A schema may have at most {MAX_FIELDS} fields.",
+        )
+    try:
+        return TargetSchema(
+            schema_id=schema_id,
+            name=payload.name.strip(),
+            description=payload.description.strip(),
+            version=version,
+            builtin=False,
+            fields=tuple(
+                TargetFieldSpec(
+                    name=field.name,
+                    # A field with no label is named by its own name rather than
+                    # showing blank everywhere it appears.
+                    label=field.label.strip() or field.name,
+                    description=field.description.strip(),
+                    required=field.required,
+                    kind=field.kind,
+                    is_identity=field.is_identity,
+                    is_unique=field.is_unique,
+                    enum_values=tuple(value for v in field.enum_values if (value := v.strip())),
+                    value_aliases=field.value_aliases,
+                    not_before=field.not_before,
+                )
+                for field in payload.fields
+            ),
+        )
+    except ValidationError as error:
+        # The model's own message is the useful one: it says which field and why.
+        first = error.errors()[0]
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(first.get("msg", "That schema is not valid.")).removeprefix("Value error, "),
+        ) from None
+
+
+def _require_session(request: Request) -> str:
+    session_id = read_session(request)
+    if not session_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Start a session first."
+        )
+    return session_id
+
+
+def _unavailable(error: Exception) -> HTTPException:
+    logger.warning("schema store unavailable: %s", type(error).__name__)
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="Saved schemas are unavailable right now.",
+    )
+
+
+@router.get("")
+def list_schemas(request: Request) -> dict[str, Any]:
+    """The built-in template plus whatever the caller has saved."""
+    session_id = read_session(request)
+    saved: list[Any] = []
+    if session_id:
+        try:
+            saved = store.list_schemas(session_id)
+        except Exception as error:
+            raise _unavailable(error) from None
+    return {
+        "builtin": target_schema_view(BUILTIN_SCHEMA),
+        "schemas": [
+            {
+                **target_schema_view(record.schema),
+                "updated_at": record.updated_at.isoformat(),
+            }
+            for record in saved
+        ],
+        "limits": {"max_fields": MAX_FIELDS, "max_schemas": store.MAX_PER_SESSION},
+    }
+
+
+@router.get("/{schema_id}")
+def read_schema(schema_id: str, request: Request) -> dict[str, Any]:
+    """One schema, the caller's own or the built-in template."""
+    if schema_id == BUILTIN_SCHEMA.schema_id:
+        return target_schema_view(BUILTIN_SCHEMA)
+    session_id = _require_session(request)
+    try:
+        record = store.find_schema(schema_id, session_id)
+    except Exception as error:
+        raise _unavailable(error) from None
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such schema.")
+    return {**target_schema_view(record.schema), "updated_at": record.updated_at.isoformat()}
+
+
+@router.post("", status_code=status.HTTP_201_CREATED)
+def create_schema(request: Request, response: Response, payload: SchemaInput) -> dict[str, Any]:
+    """Save a new schema for this visitor."""
+    session_id = ensure_session(request, response)
+    # Built with a placeholder id: the store assigns the real one, so a caller
+    # cannot choose an id that collides or impersonates the built-in template.
+    schema = _build(payload, schema_id="pending", version=1)
+    try:
+        if store.count_for_session(session_id) >= store.MAX_PER_SESSION:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"You already have {store.MAX_PER_SESSION} saved schemas.",
+            )
+        record = store.create_schema(session_id, schema)
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise _unavailable(error) from None
+    return target_schema_view(record.schema)
+
+
+@router.put("/{schema_id}")
+def replace_schema(schema_id: str, request: Request, payload: SchemaInput) -> dict[str, Any]:
+    """Save changes to a schema the caller owns."""
+    if schema_id == BUILTIN_SCHEMA.schema_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=("The built-in schema cannot be edited. Save it as a copy and edit that."),
+        )
+    session_id = _require_session(request)
+    if payload.if_version is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Saving needs the version the editor last read.",
+        )
+    schema = _build(payload, schema_id=schema_id, version=payload.if_version)
+    try:
+        record = store.update_schema(schema_id, session_id, schema, if_version=payload.if_version)
+    except store.StaleWriteError as stale:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(stale)) from None
+    except KeyError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No such schema."
+        ) from None
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise _unavailable(error) from None
+    return {**target_schema_view(record.schema), "updated_at": record.updated_at.isoformat()}
+
+
+@router.delete("/{schema_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_schema(schema_id: str, request: Request) -> Response:
+    """Forget a saved schema. Runs that used it keep their own snapshot."""
+    if schema_id == BUILTIN_SCHEMA.schema_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The built-in schema cannot be deleted.",
+        )
+    session_id = _require_session(request)
+    try:
+        deleted = store.delete_schema(schema_id, session_id)
+    except Exception as error:
+        raise _unavailable(error) from None
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such schema.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

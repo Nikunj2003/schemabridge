@@ -7,15 +7,29 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from schemabridge.agent import tools as tools_module
 from schemabridge.agent.llm import default_max_tokens, is_reasoning_model
 from schemabridge.agent.schemas import MappingProposal, ProposedMapping
-from schemabridge.agent.tools import (
-    check_proposed_mapping,
-    describe_columns,
-    describe_target_schema,
-)
+from schemabridge.agent.tools import CheckedMapping, describe_columns
 from schemabridge.domain.models import ColumnProfile, SourceColumn
 from schemabridge.domain.normalize import detect_value_kinds, normalize_header
+from schemabridge.domain.target import BUILTIN_SCHEMA
+
+
+def check_proposed_mapping(
+    source_column: SourceColumn,
+    column_profile: ColumnProfile | None,
+    target: str,
+    already_taken: set[str],
+) -> CheckedMapping:
+    """Check against the built-in template, which these gate cases are about."""
+    return tools_module.check_proposed_mapping(
+        source_column, column_profile, target, already_taken, schema=BUILTIN_SCHEMA
+    )
+
+
+def describe_target_schema(**kwargs: Any) -> str:
+    return tools_module.describe_target_schema(BUILTIN_SCHEMA, **kwargs)
 
 
 def column(column_id: str, header: str, index: int = 0) -> SourceColumn:
@@ -173,6 +187,7 @@ class TestGracefulDegradation:
             {"c1": profile("c1", "Cost Centre Ref", ["CC-4410"])},
             ["c1"],
             set(),
+            schema=BUILTIN_SCHEMA,
         )
         assert outcome.accepted == ()
         assert outcome.unavailable_reason is not None
@@ -202,6 +217,7 @@ class TestGracefulDegradation:
             {"c1": profile("c1", "Cost Centre Ref", ["CC-4410"])},
             ["c1"],
             set(),
+            schema=BUILTIN_SCHEMA,
         )
         assert not called
         assert outcome.requests_used == 0
@@ -215,6 +231,6 @@ class TestGracefulDegradation:
             raise AssertionError("budget must not be touched when there is nothing to ask")
 
         monkeypatch.setattr(propose, "reserve_model_request", should_not_run)
-        outcome = propose.propose_unresolved_mappings([], {}, [], set())
+        outcome = propose.propose_unresolved_mappings([], {}, [], set(), schema=BUILTIN_SCHEMA)
         assert outcome.requests_used == 0
         assert outcome.unavailable_reason is None

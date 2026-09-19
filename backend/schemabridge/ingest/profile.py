@@ -3,6 +3,11 @@
 A profile is what the mapping policy reasons about, and — for columns no alias
 table recognises — what the model is shown. It is deliberately a summary: the
 full dataset never leaves this function, and samples are capped and truncated.
+
+`total_count` counts every row the column spans, including blanks, and
+`non_empty_count` only those carrying a value. The difference is the signal: a
+column filled 3 times in 200 rows is almost certainly not the required field it
+is named after, and collapsing the two counts would hide that.
 """
 
 from __future__ import annotations
@@ -35,15 +40,21 @@ def profile_columns(
             if isinstance(value, str) and (trimmed := trim_surrounding(value))
         ]
         distinct = list(dict.fromkeys(present))  # preserves first-seen order
+        # Every row the column spans, blanks included. Counting only the values
+        # present would report a half-empty column as completely filled.
+        total = len(series)
 
         profiles.append(
             ColumnProfile(
                 column_id=column.id,
                 header=column.header,
                 file_name=source_file.name,
-                total_count=len(present),
+                total_count=total,
                 non_empty_count=len(present),
                 distinct_count=len(distinct),
+                # Over the values actually present: a column with two distinct
+                # values in two filled rows is fully unique in what it holds,
+                # which is what type detection needs to know.
                 unique_ratio=(len(distinct) / len(present)) if present else 0.0,
                 detected_kinds=tuple(detect_value_kinds(present)),
                 samples=tuple(

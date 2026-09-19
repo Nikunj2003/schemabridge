@@ -2,7 +2,25 @@
 
 from __future__ import annotations
 
-from schemabridge.domain.validate import run_validation_passes, validate_employee
+from schemabridge.domain import validate as validate_module
+from schemabridge.domain.cleanup import SourceValues
+from schemabridge.domain.target import BUILTIN_SCHEMA
+from schemabridge.domain.validate import TwoPassResult, ValidationOutcome
+
+
+def validate_employee(values: SourceValues) -> ValidationOutcome:
+    """Validate against the built-in template.
+
+    These tests are about the employee contract specifically, so the schema is
+    bound once here rather than repeated at every call. `test_schema.py` covers
+    validation against other schemas.
+    """
+    return validate_module.validate_record(values, schema=BUILTIN_SCHEMA)
+
+
+def run_validation_passes(values: SourceValues) -> TwoPassResult:
+    return validate_module.run_validation_passes(values, schema=BUILTIN_SCHEMA)
+
 
 VALID = {
     "employeeId": "E-1001",

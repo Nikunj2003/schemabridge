@@ -22,12 +22,32 @@ from __future__ import annotations
 
 import itertools
 import re
+from enum import StrEnum
 from functools import cached_property
 from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from schemabridge.domain.target import ValueKind
+
+class ValueKind(StrEnum):
+    """Semantic shape of a value.
+
+    Closed on purpose. Every safe repair, type-compatibility check and validation
+    rule keys off this, so a free-text type would mean a user-defined field got no
+    cleanup and no checking at all. Six kinds cover the shapes that carry
+    different *rules*, not merely different names.
+
+    Defined here rather than beside the built-in template because the generic
+    schema model is what needs it; the template is just one value of that model.
+    """
+
+    IDENTIFIER = "identifier"
+    PERSON_NAME = "person_name"
+    EMAIL = "email"
+    DATE = "date"
+    TEXT = "text"
+    ENUM = "enum"
+
 
 #: A field name has to survive being a JSON key, a CSV header and a Python dict
 #: key, so it is deliberately narrow.
@@ -68,6 +88,10 @@ class TargetFieldSpec(BaseModel):
     #: cannot express it, so validation checks it separately.
     not_before: str | None = None
 
+    #: Longest accepted value, when the destination is stricter than the kind's
+    #: default. None means the default for the kind.
+    max_length: int | None = None
+
     @field_validator("name")
     @classmethod
     def _check_name(cls, value: str) -> str:
@@ -87,9 +111,10 @@ class TargetFieldSpec(BaseModel):
     @cached_property
     def spellings(self) -> frozenset[str]:
         """Every header that unambiguously means this field."""
-        return frozenset(derive_spellings(self.name, self.label) | {
-            normalize_header(alias) for alias in self.aliases
-        }) - {""}
+        return frozenset(
+            derive_spellings(self.name, self.label)
+            | {normalize_header(alias) for alias in self.aliases}
+        ) - {""}
 
 
 class TargetSchema(BaseModel):
@@ -125,8 +150,7 @@ class TargetSchema(BaseModel):
         identities = [field.name for field in self.fields if field.is_identity]
         if len(identities) > 1:
             raise ValueError(
-                "Only one field can identify a record; "
-                f"{', '.join(identities)} are all marked."
+                f"Only one field can identify a record; {', '.join(identities)} are all marked."
             )
 
         known = set(names)
@@ -212,7 +236,12 @@ def _property_for(field: TargetFieldSpec) -> dict[str, Any]:
         values: list[Any] = list(field.enum_values)
         if nullable:
             values.append(None)
-        return {"title": field.label, "description": field.description, "enum": values}
+        return {
+            "type": ["string", "null"] if nullable else "string",
+            "title": field.label,
+            "description": field.description,
+            "enum": values,
+        }
 
     base: dict[str, Any]
     if field.kind is ValueKind.EMAIL:
@@ -235,6 +264,8 @@ def _property_for(field: TargetFieldSpec) -> dict[str, Any]:
 
     if nullable:
         base["type"] = [base["type"], "null"]
+    if field.max_length is not None:
+        base["maxLength"] = field.max_length
     base["title"] = field.label
     if field.description:
         base["description"] = field.description
@@ -299,8 +330,14 @@ def derive_spellings(name: str, label: str) -> set[str]:
     """Headers that unambiguously mean a field called `name`.
 
     Generated rather than demanded of whoever builds the schema, because a header
-    like `emp_nm` or `doj` is what the client's export actually contains and
-    nobody lists those up front.
+    like `emp_id` or `joining_date` is what the client's export actually contains
+    and nobody lists those up front.
+
+    Three rules, each of which was measured against the sample files before being
+    kept: the name and label themselves, the head noun alone (`workEmail` is very
+    often just `email`), and every substitution of a vocabulary synonym. Rules
+    that generated initialisms were tried and removed — they matched nothing the
+    other three did not, while inventing collisions like `son` for a start date.
 
     Combinatorial over the vocabulary, but bounded: field names are a handful of
     words and each word has a handful of synonyms.
@@ -312,28 +349,12 @@ def derive_spellings(name: str, label: str) -> set[str]:
 
     out.add(normalize_header("".join(words)))
     if len(words) > 1:
-        # Initialism, which is how "date of joining" becomes "doj".
-        out.add("".join(word[0] for word in words))
         # The head noun alone: "workEmail" is very often just "email".
         out.add(normalize_header(words[-1]))
 
     options = [(word, *_VOCABULARY.get(word, ())) for word in words]
     for combination in itertools.product(*options):
         out.add(normalize_header("".join(combination)))
-        if len(combination) > 1:
-            # Abbreviate the long words to an initial, so "employee name" also
-            # covers "empname" and "empnm" once the synonyms are substituted.
-            out.add(
-                normalize_header(
-                    "".join(part[0] if len(part) > 3 else part for part in combination)
-                )
-            )
-            # The initialism of the substituted words: "date of joining" is
-            # written "doj" far more often than it is written out.
-            out.add("".join(part[0] for part in combination))
-            # Reversed, because an export is as likely to say "joining date" as
-            # "date of joining" — and their initialisms differ.
-            out.add("".join(part[0] for part in reversed(combination)))
 
     # One- and two-character spellings collide with too much to be safe.
     return {spelling for spelling in out if len(spelling) > 2}

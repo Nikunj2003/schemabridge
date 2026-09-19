@@ -5,6 +5,11 @@ pure domain functions, and returns the delta. Keeping the decisions in
 `schemabridge.domain` means they stay testable without a graph, a database, or a
 model — and it keeps the escalation policy in one place rather than scattered
 across orchestration code.
+
+The target schema is one of the things pulled from state. It was snapshotted when
+the run was created, so editing a saved schema cannot retroactively change what a
+paused migration is being validated against — a run's contract is fixed at the
+moment it starts.
 """
 
 from __future__ import annotations
@@ -36,9 +41,9 @@ from schemabridge.domain.models import (
     RunPhase,
     ValidationError,
 )
-from schemabridge.domain.target import TARGET_FIELDS, get_field
+from schemabridge.domain.schema import TargetSchema
 from schemabridge.domain.validate import run_validation_passes
-from schemabridge.graph.state import MigrationState, next_sequence
+from schemabridge.graph.state import MigrationState, next_sequence, run_schema
 from schemabridge.server.target_client import (
     MAX_ATTEMPTS,
     attempt_record,
@@ -48,6 +53,22 @@ from schemabridge.server.target_client import (
     idempotency_key,
     payload_hash,
 )
+
+
+def _label(schema: TargetSchema, name: str | None) -> str:
+    """A field's human name, falling back to the raw name."""
+    if not name:
+        return "this value"
+    spec = schema.field(name)
+    return spec.label if spec else name
+
+
+def _subject_of(schema: TargetSchema, record: CanonicalRecord) -> str:
+    """How to name a record in the audit trail: its identity value, else its id."""
+    identity = schema.identity_field
+    if identity and (value := record.values.get(identity)):
+        return value
+    return record.id
 
 
 def _event(
@@ -82,9 +103,10 @@ def propose_mappings(state: MigrationState) -> dict[str, Any]:
     """Decide which source column becomes which target field."""
     columns = state.get("columns", ())
     profiles = state.get("profiles", ())
+    schema = run_schema(state)
     seq = next_sequence(state)
 
-    result = decide_mappings(columns, profiles)
+    result = decide_mappings(columns, profiles, schema=schema)
 
     events: list[AuditEvent] = []
     for decision in result.decisions:
@@ -92,14 +114,13 @@ def propose_mappings(state: MigrationState) -> dict[str, Any]:
         header = column.header if column else decision.column_id
 
         if decision.outcome is MappingOutcome.AUTO_MAPPED and decision.target:
-            spec = get_field(decision.target)
             events.append(
                 _event(
                     seq,
                     "mapping_applied",
                     decision.evidence[0] if decision.evidence else "Deterministic match.",
                     subject=header,
-                    after=spec.label if spec else decision.target,
+                    after=_label(schema, decision.target),
                     basis=decision.basis.value,
                 )
             )
@@ -148,13 +169,14 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
 
     columns = list(state.get("columns", ()))
     profiles = {profile.column_id: profile for profile in state.get("profiles", ())}
+    schema = run_schema(state)
     taken = {
         decision.target
         for decision in state.get("mappings", ())
         if decision.outcome is MappingOutcome.AUTO_MAPPED and decision.target
     }
 
-    outcome = propose_unresolved_mappings(columns, profiles, unresolved, taken)
+    outcome = propose_unresolved_mappings(columns, profiles, unresolved, taken, schema=schema)
 
     seq = next_sequence(state)
     by_id = {column.id: column for column in columns}
@@ -166,7 +188,6 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
         # is chosen per run, so TargetField(...) would raise for anything outside
         # the built-in template. The verification gate in `check_proposed_mapping`
         # is what guarantees the name is real.
-        spec = get_field(accepted.target)
         header = by_id[accepted.column_id].header
         added.append(
             MappingDecision(
@@ -183,7 +204,7 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
                 "mapping_applied",
                 accepted.evidence[-1] if accepted.evidence else "Model suggestion, verified.",
                 subject=header,
-                after=spec.label if spec else accepted.target,
+                after=_label(schema, accepted.target),
                 basis=MappingBasis.MODEL_ASSISTED.value,
             )
         )
@@ -238,13 +259,17 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
                 options=(
                     *[
                         IssueOption(
-                            id=f"map:{spec.name.value}",
+                            id=f"map:{spec.name}",
                             label=f"Map to {spec.label}",
-                            detail=f'Treat "{column.header}" as {spec.description}',
+                            detail=(
+                                f'Treat "{column.header}" as {spec.description}'
+                                if spec.description
+                                else f'Treat "{column.header}" as {spec.label}.'
+                            ),
                             target=spec.name,
                         )
-                        for spec in TARGET_FIELDS
-                        if spec.name.value not in taken
+                        for spec in schema.fields
+                        if spec.name not in taken
                     ],
                     IssueOption(
                         id="ignore",
@@ -375,6 +400,7 @@ def apply_resolutions(state: MigrationState) -> dict[str, Any]:
 
     issues = {issue.id: issue for issue in state.get("issues", ())}
     columns = {column.id: column for column in state.get("columns", ())}
+    schema = run_schema(state)
 
     added: list[MappingDecision] = []
     events: list[AuditEvent] = []
@@ -397,8 +423,7 @@ def apply_resolutions(state: MigrationState) -> dict[str, Any]:
         if option and option.target:
             column_id = issue.column_id or option_id.removeprefix("use:")
             if column_id in columns:
-                spec = get_field(option.target)
-                label = spec.label if spec else option.target
+                label = _label(schema, option.target)
                 added.append(
                     MappingDecision(
                         column_id=column_id,
@@ -442,6 +467,7 @@ def reconcile(state: MigrationState) -> dict[str, Any]:
     """Project rows onto the target shape, then merge them into one record each."""
     targets = _accepted_targets(state)
     files = {source.id: source for source in state.get("files", ())}
+    schema = run_schema(state)
     seq = next_sequence(state)
 
     incoming: list[IncomingRow] = []
@@ -463,14 +489,14 @@ def reconcile(state: MigrationState) -> dict[str, Any]:
             )
         )
 
-    result = reconcile_identities(incoming)
+    result = reconcile_identities(incoming, schema=schema)
     events = [
         _event(
             seq,
             "records_reconciled",
             (
                 f"{len(incoming)} source rows became {len(result.records)} records; "
-                f"{result.merged_rows} were merged as the same person."
+                f"{result.merged_rows} were merged as the same record."
             ),
             source_rows=len(incoming),
             records=len(result.records),
@@ -523,6 +549,7 @@ def _record_resolutions(state: MigrationState) -> tuple[set[str], dict[str, dict
 def clean_and_validate(state: MigrationState) -> dict[str, Any]:
     """Apply safe repairs and validate, escalating anything that fails twice."""
     seq = next_sequence(state)
+    schema = run_schema(state)
     excluded_ids, corrections = _record_resolutions(state)
     validated: list[CanonicalRecord] = []
     issues: list[ReviewIssue] = []
@@ -546,19 +573,17 @@ def clean_and_validate(state: MigrationState) -> dict[str, Any]:
         if applied:
             values.update(applied)
 
-        outcome = run_validation_passes(values)
+        outcome = run_validation_passes(values, schema=schema)
         repair_count += len(outcome.repairs)
 
         for repair in outcome.repairs:
-            spec = get_field(repair.field_name)
-            field_label = spec.label if spec else repair.field_name
             rule = repair.rule.replace("_", " ")
             events.append(
                 _event(
                     seq,
                     "value_repaired",
-                    f"{field_label}: {rule}.",
-                    subject=record.values.get("employeeId") or record.id,
+                    f"{_label(schema, repair.field_name)}: {rule}.",
+                    subject=_subject_of(schema, record),
                     before=repair.before,
                     after=repair.after,
                 )
@@ -566,14 +591,13 @@ def clean_and_validate(state: MigrationState) -> dict[str, Any]:
             seq += 1
 
         for field_name, new_value in applied.items():
-            spec = get_field(field_name)
             events.append(
                 _event(
                     seq,
                     "value_corrected",
-                    f"Reviewer supplied a {spec.label if spec else field_name}.",
+                    f"Reviewer supplied a {_label(schema, field_name)}.",
                     actor=Actor.REVIEWER,
-                    subject=record.values.get("employeeId") or record.id,
+                    subject=_subject_of(schema, record),
                     before=record.values.get(field_name),
                     after=new_value,
                 )
@@ -603,15 +627,13 @@ def clean_and_validate(state: MigrationState) -> dict[str, Any]:
                 else "Safe repairs were applied and it is still invalid."
             )
             invalid_field = errors[0].field_name if errors else None
-            spec = get_field(invalid_field) if invalid_field else None
-            label = spec.label if spec else (invalid_field or "this value")
+            label = _label(schema, invalid_field)
             issues.append(
                 ReviewIssue(
                     id=f"issue:invalid:{record.id}",
                     type=IssueType.VALIDATION_FAILED_TWICE,
                     reason=(
-                        f"{record.values.get('employeeId') or record.id} failed validation "
-                        f"twice. {explanation}"
+                        f"{_subject_of(schema, record)} failed validation twice. {explanation}"
                     ),
                     blocking=True,
                     record_ids=(record.id,),
@@ -646,7 +668,7 @@ def clean_and_validate(state: MigrationState) -> dict[str, Any]:
                     seq,
                     "validation_failed_twice",
                     explanation,
-                    subject=record.values.get("employeeId") or record.id,
+                    subject=_subject_of(schema, record),
                     errors=len(errors),
                 )
             )
@@ -683,6 +705,7 @@ def deliver(state: MigrationState) -> dict[str, Any]:
     """
     run_id = state.get("run_id", "run")
     records = state.get("records", ())
+    schema = run_schema(state)
     existing = {intent.record_id: intent for intent in state.get("deliveries", ())}
     demo_config = state.get("demo_delivery", {}) or {}
 
@@ -712,8 +735,8 @@ def deliver(state: MigrationState) -> dict[str, Any]:
             if attempt_number > MAX_ATTEMPTS:
                 continue
 
-            employee_id = record.values.get("employeeId") or record.id
-            payload = build_payload(record)
+            subject = _subject_of(schema, record)
+            payload = build_payload(record, schema=schema)
             digest = payload_hash(payload)
             key = idempotency_key(run_id, record)
 
@@ -722,7 +745,7 @@ def deliver(state: MigrationState) -> dict[str, Any]:
                     seq,
                     "delivery_attempted",
                     f"Sending to the destination (attempt {attempt_number}).",
-                    subject=employee_id,
+                    subject=subject,
                     attempt=attempt_number,
                 )
             )
@@ -731,7 +754,7 @@ def deliver(state: MigrationState) -> dict[str, Any]:
             # Per-record demo behaviour, configured by the run rather than
             # inferred from the data, so production logic has no test branches.
             demo_headers: dict[str, str] = {}
-            behaviour = demo_config.get(employee_id)
+            behaviour = demo_config.get(subject)
             if behaviour == "fail_once" and attempt_number == 1:
                 demo_headers["x-demo-fail-once"] = "1"
             elif behaviour == "reject":
@@ -741,6 +764,7 @@ def deliver(state: MigrationState) -> dict[str, Any]:
                 client,
                 run_id,
                 record,
+                schema=schema,
                 request_origin=state.get("request_origin"),
                 attempt_number=attempt_number,
                 demo_headers=demo_headers or None,
@@ -776,7 +800,7 @@ def deliver(state: MigrationState) -> dict[str, Any]:
                     seq,
                     action,
                     result.detail,
-                    subject=employee_id,
+                    subject=subject,
                     after=result.target_id,
                     status=result.status_code,
                     attempt=attempt_number,

@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
-from schemabridge.domain.mapping import decide_mappings
+from collections.abc import Sequence
+
+from schemabridge.domain import mapping as mapping_module
+from schemabridge.domain.mapping import MappingResult
 from schemabridge.domain.models import ColumnProfile, IssueType, MappingOutcome, SourceColumn
 from schemabridge.domain.normalize import detect_value_kinds, normalize_header
-from schemabridge.domain.target import TargetField
+from schemabridge.domain.target import BUILTIN_SCHEMA, TargetField
+
+
+def decide_mappings(
+    columns: Sequence[SourceColumn], profiles: Sequence[ColumnProfile]
+) -> MappingResult:
+    """Map against the built-in template, which these gate tests are about."""
+    return mapping_module.decide_mappings(columns, profiles, schema=BUILTIN_SCHEMA)
 
 
 def column(column_id: str, header: str, index: int = 0, file_id: str = "f1") -> SourceColumn:

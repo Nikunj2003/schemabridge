@@ -106,9 +106,7 @@ def test_rejected_record_without_a_detail_still_says_something() -> None:
         validation=(ValidationPass(label=ValidationPassLabel.AS_MAPPED, valid=True, errors=()),),
         disposition=Disposition.FAILED,
     )
-    view = build_run_view(
-        "run_test", _state(records=(record,)), paused=False, runnable=False
-    )
+    view = build_run_view("run_test", _state(records=(record,)), paused=False, runnable=False)
     assert view.records[0].errors == ["The destination refused this record."]
 
 
@@ -132,9 +130,7 @@ def test_validation_failures_keep_their_own_errors() -> None:
         ),
         disposition=Disposition.NEEDS_REVIEW,
     )
-    view = build_run_view(
-        "run_test", _state(records=(record,)), paused=False, runnable=False
-    )
+    view = build_run_view("run_test", _state(records=(record,)), paused=False, runnable=False)
     assert view.records[0].errors == ["Not a usable email address."]
 
 
@@ -185,10 +181,7 @@ def test_column_totals_report_current_state_not_attempts() -> None:
 
 def test_row_and_employee_counts_stay_separate_units() -> None:
     """Merged duplicates are reported, never folded into one total."""
-    rows = tuple(
-        SourceRow(id=f"r{i}", file_id="f0", row=i + 2, values={})
-        for i in range(12)
-    )
+    rows = tuple(SourceRow(id=f"r{i}", file_id="f0", row=i + 2, values={}) for i in range(12))
     records = tuple(
         CanonicalRecord(id=f"rec:{i}", values={"employeeId": f"E-{i}"}) for i in range(10)
     )

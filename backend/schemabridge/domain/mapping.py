@@ -6,6 +6,11 @@ hides *why* a decision was made, cannot be explained to a reviewer, and invites
 treating an arbitrary threshold as a calibrated probability. Every column passes
 through explicit gates instead, and the evidence that opened or closed each gate
 is recorded verbatim.
+
+Ambiguity is *derived*, not listed. A header two fields both claim — "Date", when
+the schema has both a start and an end — is ambiguous by construction, so it
+escalates without anybody having enumerated it. That matters for a user-defined
+schema, where no such list could exist.
 """
 
 from __future__ import annotations
@@ -25,16 +30,9 @@ from schemabridge.domain.models import (
     SourceColumn,
 )
 from schemabridge.domain.normalize import detect_value_kinds
-from schemabridge.domain.target import (
-    REQUIRED_FIELDS,
-    TARGET_FIELDS,
-    TargetField,
-    TargetFieldSpec,
-    ValueKind,
-    get_field,
-)
+from schemabridge.domain.schema import TargetFieldSpec, TargetSchema, ValueKind
 
-POLICY_VERSION = "mapping/1"
+POLICY_VERSION = "mapping/2"
 
 #: Value kinds acceptable as evidence for each target kind.
 _COMPATIBLE_KINDS: dict[ValueKind, frozenset[ValueKind]] = {
@@ -46,16 +44,6 @@ _COMPATIBLE_KINDS: dict[ValueKind, frozenset[ValueKind]] = {
         {ValueKind.TEXT, ValueKind.ENUM, ValueKind.PERSON_NAME, ValueKind.IDENTIFIER}
     ),
     ValueKind.ENUM: frozenset({ValueKind.ENUM, ValueKind.TEXT}),
-}
-
-#: Headers that name a concept more than one target field shares, so the header
-#: alone cannot settle which was meant.
-_AMBIGUOUS_HEADERS: dict[str, tuple[TargetField, ...]] = {
-    "date": (TargetField.START_DATE, TargetField.END_DATE),
-    "dates": (TargetField.START_DATE, TargetField.END_DATE),
-    "employmentdate": (TargetField.START_DATE, TargetField.END_DATE),
-    "effectivedate": (TargetField.START_DATE, TargetField.END_DATE),
-    "contractdate": (TargetField.START_DATE, TargetField.END_DATE),
 }
 
 
@@ -88,19 +76,36 @@ def _is_type_compatible(spec: TargetFieldSpec, kinds: Sequence[ValueKind]) -> bo
     return any(kind in allowed for kind in kinds)
 
 
-def _candidates_for(column: SourceColumn, profile: ColumnProfile | None) -> list[_Candidate]:
-    """Every target field whose name or aliases match this column's header."""
+def _shared_header_fields(
+    column: SourceColumn, schema: TargetSchema
+) -> tuple[TargetFieldSpec, ...]:
+    """Fields that all claim this column's header, when more than one does.
+
+    Empty when the header is unclaimed or claimed by exactly one field. A header
+    two fields share cannot be settled by the header alone, whatever the values
+    look like.
+    """
+    names = schema.fields_for_header(column.normalized_header)
+    if len(names) < 2:
+        return ()
+    return tuple(spec for name in names if (spec := schema.field(name)))
+
+
+def _candidates_for(
+    column: SourceColumn, profile: ColumnProfile | None, schema: TargetSchema
+) -> list[_Candidate]:
+    """Every target field whose name or spellings match this column's header."""
     kinds = _profile_kinds(profile) if profile else ()
     candidates: list[_Candidate] = []
 
-    for spec in TARGET_FIELDS:
+    for spec in schema.fields:
         evidence: list[str] = []
         basis: MappingBasis | None = None
 
-        if column.normalized_header == spec.name.value.lower():
+        if column.normalized_header == spec.name.lower():
             basis = MappingBasis.EXACT_NAME
             evidence.append(f'Header "{column.header}" is the target field name.')
-        elif column.normalized_header in spec.aliases:
+        elif column.normalized_header in spec.spellings:
             basis = MappingBasis.ALIAS
             evidence.append(f'Header "{column.header}" is a known spelling of {spec.label}.')
 
@@ -141,9 +146,13 @@ def _as_candidate(column_id: str, candidate: _Candidate) -> MappingCandidate:
 
 def _map_option(spec: TargetFieldSpec, header: str) -> IssueOption:
     return IssueOption(
-        id=f"map:{spec.name.value}",
+        id=f"map:{spec.name}",
         label=f"Map to {spec.label}",
-        detail=f'Treat "{header}" as {spec.description}',
+        detail=(
+            f'Treat "{header}" as {spec.description}'
+            if spec.description
+            else f'Treat "{header}" as {spec.label}.'
+        ),
         target=spec.name,
     )
 
@@ -157,7 +166,9 @@ def _ignore_option(header: str) -> IssueOption:
 
 
 def _find_contention(
-    columns: Sequence[SourceColumn], per_column: dict[str, list[_Candidate]]
+    columns: Sequence[SourceColumn],
+    per_column: dict[str, list[_Candidate]],
+    schema: TargetSchema,
 ) -> tuple[dict[str, list[SourceColumn]], set[str]]:
     """Group columns that contend for the same target *within one file*.
 
@@ -168,8 +179,8 @@ def _find_contention(
     contention: dict[str, list[SourceColumn]] = {}
     for column in columns:
         viable = [c for c in per_column.get(column.id, []) if c.type_compatible]
-        if len(viable) == 1 and column.normalized_header not in _AMBIGUOUS_HEADERS:
-            key = f"{column.file_id}:{viable[0].spec.name.value}"
+        if len(viable) == 1 and not _shared_header_fields(column, schema):
+            key = f"{column.file_id}:{viable[0].spec.name}"
             contention.setdefault(key, []).append(column)
 
     contended = {
@@ -179,26 +190,31 @@ def _find_contention(
 
 
 def decide_mappings(
-    columns: Sequence[SourceColumn], profiles: Sequence[ColumnProfile]
+    columns: Sequence[SourceColumn],
+    profiles: Sequence[ColumnProfile],
+    *,
+    schema: TargetSchema,
 ) -> MappingResult:
     """Decide the mapping for every source column."""
     profile_by_id = {profile.column_id: profile for profile in profiles}
     per_column = {
-        column.id: _candidates_for(column, profile_by_id.get(column.id)) for column in columns
+        column.id: _candidates_for(column, profile_by_id.get(column.id), schema)
+        for column in columns
     }
 
     decisions: list[MappingDecision] = []
     issues: list[ReviewIssue] = []
     unresolved: list[str] = []
 
-    contention, contended = _find_contention(columns, per_column)
+    contention, contended = _find_contention(columns, per_column, schema)
 
     for key, competing in contention.items():
         if len(competing) < 2:
             continue
         target = key.split(":", 1)[1]
-        spec = get_field(target)
-        assert spec is not None
+        spec = schema.field(target)
+        if spec is None:
+            continue
         headers = ", ".join(f'"{c.header}"' for c in competing)
         issues.append(
             ReviewIssue(
@@ -230,8 +246,7 @@ def decide_mappings(
         sample = profile.samples[0] if profile and profile.samples else None
 
         # Gate: a header naming a concept several targets share.
-        if ambiguous := _AMBIGUOUS_HEADERS.get(column.normalized_header):
-            specs = [spec for target in ambiguous if (spec := get_field(target.value))]
+        if specs := _shared_header_fields(column, schema):
             labels = " or ".join(spec.label for spec in specs)
             decisions.append(
                 MappingDecision(
@@ -261,7 +276,7 @@ def decide_mappings(
                     reason=(
                         f'"{column.header}" in {column.file_name} could be {labels}. '
                         f"The header does not say which, and picking wrong would "
-                        f"silently misdate every record in this file."
+                        f"silently corrupt every record in this file."
                     ),
                     blocking=True,
                     column_id=column.id,
@@ -387,14 +402,15 @@ def decide_mappings(
     # Required targets nobody supplies.
     supplied = {d.target for d in decisions if d.outcome is MappingOutcome.AUTO_MAPPED}
     offered = {alt.target for d in decisions for alt in d.alternatives}
-    for required in REQUIRED_FIELDS:
+    for required in sorted(schema.required_names):
         if required in supplied or required in offered or unresolved:
             continue
-        spec = get_field(required.value)
-        assert spec is not None
+        spec = schema.field(required)
+        if spec is None:
+            continue
         issues.append(
             ReviewIssue(
-                id=f"issue:missing:{required.value}",
+                id=f"issue:missing:{required}",
                 type=IssueType.REQUIRED_FIELD_UNMAPPED,
                 reason=(
                     f"{spec.label} is required by the target schema, but none of the "
@@ -402,7 +418,7 @@ def decide_mappings(
                     f"without it."
                 ),
                 blocking=True,
-                field_name=required.value,
+                field_name=required,
                 options=tuple(
                     IssueOption(
                         id=f"use:{c.id}",

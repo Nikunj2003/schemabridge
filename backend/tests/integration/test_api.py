@@ -69,7 +69,7 @@ def client(origin: str) -> Iterator[httpx.Client]:
         yield http_client
 
 
-def upload(client: httpx.Client, *names: str) -> Any:
+def upload(client: httpx.Client, *names: str, schema_id: str | None = None) -> Any:
     files = [
         (
             "files",
@@ -83,7 +83,8 @@ def upload(client: httpx.Client, *names: str) -> Any:
         )
         for name in names
     ]
-    return client.post("/api/runs", files=files)
+    data = {"schema_id": schema_id} if schema_id else None
+    return client.post("/api/runs", files=files, data=data)
 
 
 #: Upper bound on advance calls in a test. Execution is bounded per request, so a
@@ -109,18 +110,16 @@ def drive(client: httpx.Client, run: Any) -> Any:
     raise AssertionError(f"run {run_id} did not settle within {_MAX_ADVANCES} advances")
 
 
-def start(client: httpx.Client, *names: str) -> Any:
+def start(client: httpx.Client, *names: str, schema_id: str | None = None) -> Any:
     """Upload and run until something needs a person, or it is done."""
-    response = upload(client, *names)
+    response = upload(client, *names, schema_id=schema_id)
     assert response.status_code == 201, response.text
     return drive(client, response.json())
 
 
 def _any_decision(issue: Any) -> dict[str, Any]:
     """A decision that moves an issue forward, preferring a concrete value."""
-    concrete = next(
-        (o for o in issue["options"] if o.get("value") or o.get("target")), None
-    )
+    concrete = next((o for o in issue["options"] if o.get("value") or o.get("target")), None)
     if concrete:
         return {"action": "approve", "option_id": concrete["id"], "value": concrete.get("value")}
     excluding = next((o for o in issue["options"] if o["id"].startswith("exclude:")), None)
@@ -139,9 +138,7 @@ class TestSchemaEndpoint:
 
 
 class TestAcceptance:
-    def test_creating_a_run_returns_before_the_work_is_done(
-        self, client: httpx.Client
-    ) -> None:
+    def test_creating_a_run_returns_before_the_work_is_done(self, client: httpx.Client) -> None:
         """The upload is accepted; nothing is migrated yet.
 
         Doing the whole migration inside the create request is what made the run
@@ -162,9 +159,7 @@ class TestAcceptance:
         # There is work left, and the caller is told so.
         assert run["runnable"]
 
-    def test_work_becomes_visible_before_the_run_finishes(
-        self, client: httpx.Client
-    ) -> None:
+    def test_work_becomes_visible_before_the_run_finishes(self, client: httpx.Client) -> None:
         """Progress is observable part-way through, not only at the end."""
         created = upload(client, "employees-clean.csv").json()
         run_id = created["run_id"]
@@ -261,9 +256,7 @@ class TestMessyRun:
                 if issue["blocking"] and issue["status"] == "open"
             }
             assert remaining, "paused with nothing open to answer"
-            final = drive(
-                client, client.post(f"/api/runs/{run_id}/resolve", json=remaining).json()
-            )
+            final = drive(client, client.post(f"/api/runs/{run_id}/resolve", json=remaining).json())
 
         assert final["counters"]["awaiting_review"] == 0
         assert final["phase"] in {"complete", "complete_with_failures"}
@@ -419,3 +412,193 @@ class TestPollingIsSafe:
         later = client.get(f"/api/runs/{run_id}?since={cursor}").json()
         assert all(event["seq"] > cursor for event in later["events"])
         assert len(later["events"]) < len(everything["events"])
+
+
+# ---------------------------------------------------------------------------
+# Saved schemas
+# ---------------------------------------------------------------------------
+
+ORDER_SCHEMA = {
+    "name": "Order",
+    "description": "A purchase order.",
+    "fields": [
+        {
+            "name": "orderRef",
+            "label": "Order reference",
+            "kind": "identifier",
+            "required": True,
+            "is_identity": True,
+        },
+        {
+            "name": "customerEmail",
+            "label": "Customer email",
+            "kind": "email",
+            "required": True,
+            "is_unique": True,
+        },
+        {"name": "placedDate", "label": "Placed date", "kind": "date", "required": True},
+    ],
+}
+
+
+class TestSchemaCrud:
+    def test_the_builtin_template_is_always_offered(self, client: httpx.Client) -> None:
+        listing = client.get("/api/schemas").json()
+        assert listing["builtin"]["name"] == "Employee"
+        assert listing["builtin"]["builtin"] is True
+        # Derived spellings are shown, so a person can see why a header matches.
+        start_date = next(f for f in listing["builtin"]["fields"] if f["name"] == "startDate")
+        assert "doj" in start_date["spellings"]
+
+    def test_a_saved_schema_round_trips(self, client: httpx.Client) -> None:
+        created = client.post("/api/schemas", json=ORDER_SCHEMA)
+        assert created.status_code == 201, created.text
+        body = created.json()
+        schema_id = body["schema_id"]
+        assert schema_id.startswith("sch_")
+        assert body["builtin"] is False
+        assert [f["name"] for f in body["fields"]] == [
+            "orderRef",
+            "customerEmail",
+            "placedDate",
+        ]
+
+        fetched = client.get(f"/api/schemas/{schema_id}").json()
+        assert fetched["name"] == "Order"
+        assert any(f["is_identity"] for f in fetched["fields"])
+
+        listing = client.get("/api/schemas").json()
+        assert schema_id in {s["schema_id"] for s in listing["schemas"]}
+
+        assert client.delete(f"/api/schemas/{schema_id}").status_code == 204
+        assert client.get(f"/api/schemas/{schema_id}").status_code == 404
+
+    def test_the_builtin_template_cannot_be_edited_or_deleted(self, client: httpx.Client) -> None:
+        """Read-only by design: editing it means saving a copy."""
+        assert client.put("/api/schemas/builtin:employee", json=ORDER_SCHEMA).status_code == 409
+        assert client.delete("/api/schemas/builtin:employee").status_code == 409
+
+    def test_a_concurrent_edit_is_refused_rather_than_lost(self, client: httpx.Client) -> None:
+        """Two tabs open on one schema must not silently discard a save."""
+        schema_id = client.post("/api/schemas", json=ORDER_SCHEMA).json()["schema_id"]
+        try:
+            first = client.put(
+                f"/api/schemas/{schema_id}",
+                json={**ORDER_SCHEMA, "name": "Order v2", "if_version": 1},
+            )
+            assert first.status_code == 200, first.text
+            assert first.json()["version"] == 2
+
+            # The second writer still believes it is version 1.
+            stale = client.put(
+                f"/api/schemas/{schema_id}",
+                json={**ORDER_SCHEMA, "name": "Order v3", "if_version": 1},
+            )
+            assert stale.status_code == 409
+            assert "changed" in stale.json()["detail"].lower()
+            # The first save survived.
+            assert client.get(f"/api/schemas/{schema_id}").json()["name"] == "Order v2"
+        finally:
+            client.delete(f"/api/schemas/{schema_id}")
+
+    def test_an_invalid_schema_is_refused_with_the_reason(self, client: httpx.Client) -> None:
+        two_identities = {
+            "name": "Broken",
+            "fields": [
+                {"name": "a", "label": "A", "is_identity": True},
+                {"name": "b", "label": "B", "is_identity": True},
+            ],
+        }
+        response = client.post("/api/schemas", json=two_identities)
+        assert response.status_code == 400
+        assert "identify" in response.json()["detail"]
+
+    def test_another_visitor_cannot_see_it(self, origin: str, client: httpx.Client) -> None:
+        """A schema id appears in URLs, so it is not a credential."""
+        schema_id = client.post("/api/schemas", json=ORDER_SCHEMA).json()["schema_id"]
+        try:
+            with httpx.Client(base_url=origin, timeout=30) as stranger:
+                assert stranger.get(f"/api/schemas/{schema_id}").status_code in {401, 404}
+        finally:
+            client.delete(f"/api/schemas/{schema_id}")
+
+
+class TestRunsUseTheChosenSchema:
+    def test_a_detected_schema_maps_the_file_it_came_from(self, client: httpx.Client) -> None:
+        """No saved contract at all: the file's own headers become the draft."""
+        run = start(client, "employees-legacy.csv", schema_id="detected")
+        assert run["schema_name"] == "Detected schema"
+        # Every column placed, so detection did not invent work for a reviewer.
+        assert all(m["target"] for m in run["mappings"])
+        assert run["counters"]["escalated"] == 0
+
+    def test_an_unknown_schema_id_refuses_rather_than_falling_back(
+        self, client: httpx.Client
+    ) -> None:
+        """Migrating against a different contract is worse than not starting."""
+        response = upload(client, "employees-clean.csv", schema_id="sch_doesnotexist")
+        assert response.status_code == 404
+
+    def test_a_run_keeps_its_schema_after_the_saved_one_changes(self, client: httpx.Client) -> None:
+        """A paused run's contract is fixed when it starts.
+
+        Otherwise editing a schema would retroactively change what an in-flight
+        migration is being validated against.
+        """
+        schema_id = client.post(
+            "/api/schemas",
+            json={
+                "name": "Staff",
+                "fields": [
+                    {
+                        "name": "employeeId",
+                        "label": "Employee ID",
+                        "kind": "identifier",
+                        "required": True,
+                        "is_identity": True,
+                    },
+                    {"name": "fullName", "label": "Full name", "kind": "person_name"},
+                ],
+            },
+        ).json()["schema_id"]
+        try:
+            created = upload(client, "employees-clean.csv", schema_id=schema_id)
+            assert created.status_code == 201, created.text
+            run_id = created.json()["run_id"]
+            assert created.json()["schema_name"] == "Staff"
+
+            renamed = client.put(
+                f"/api/schemas/{schema_id}",
+                json={
+                    "name": "Staff renamed",
+                    "fields": [
+                        {
+                            "name": "employeeId",
+                            "label": "Employee ID",
+                            "kind": "identifier",
+                            "required": True,
+                            "is_identity": True,
+                        }
+                    ],
+                    "if_version": 1,
+                },
+            )
+            assert renamed.status_code == 200, renamed.text
+
+            # The run still reports the contract it started with.
+            after = client.get(f"/api/runs/{run_id}").json()
+            assert after["schema_name"] == "Staff"
+        finally:
+            client.delete(f"/api/schemas/{schema_id}")
+
+    def test_a_deleted_schema_does_not_break_a_run_that_used_it(self, client: httpx.Client) -> None:
+        schema_id = client.post("/api/schemas", json=ORDER_SCHEMA).json()["schema_id"]
+        created = upload(client, "employees-clean.csv", schema_id=schema_id)
+        assert created.status_code == 201, created.text
+        run_id = created.json()["run_id"]
+        assert client.delete(f"/api/schemas/{schema_id}").status_code == 204
+
+        # The run snapshotted the schema, so it is still readable and drivable.
+        run = client.get(f"/api/runs/{run_id}").json()
+        assert run["schema_name"] == "Order"
+        drive(client, run)

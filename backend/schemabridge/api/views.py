@@ -7,7 +7,7 @@ would put the whole uploaded dataset back on the wire on every poll.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel
 
@@ -21,7 +21,8 @@ from schemabridge.domain.models import (
     ReviewIssue,
     RunPhase,
 )
-from schemabridge.domain.target import TARGET_FIELDS, get_field
+from schemabridge.domain.schema import TargetSchema
+from schemabridge.graph.state import run_schema
 
 
 def _attr(value: Any, name: str, default: Any = None) -> Any:
@@ -139,6 +140,9 @@ class RunView(BaseModel):
     events: list[EventView]
     latest_seq: int
     blocked_reason: str | None
+    #: The contract this run was validated against, named so the UI can say which.
+    schema_name: str
+    schema_id: str
 
 
 _PHASE_LABELS: dict[RunPhase, str] = {
@@ -153,13 +157,13 @@ _PHASE_LABELS: dict[RunPhase, str] = {
 }
 
 
-def _mapping_views(state: dict[str, Any]) -> list[MappingView]:
+def _mapping_views(state: dict[str, Any], schema: TargetSchema) -> list[MappingView]:
     columns = {_attr(column, "id"): column for column in state.get("columns", ())}
     views: list[MappingView] = []
     for decision in state.get("mappings", ()):
         column = columns.get(_attr(decision, "column_id"))
         target = _enum_value(_attr(decision, "target"), "") or None
-        spec = get_field(target) if target else None
+        spec = schema.field(target) if target else None
         views.append(
             MappingView(
                 column=_attr(column, "header") or _attr(decision, "column_id", ""),
@@ -196,12 +200,12 @@ def _last_delivery_detail(intent: Any) -> str | None:
 
 
 def _record_views(
-    records: tuple[CanonicalRecord, ...], deliveries: tuple[DeliveryIntent, ...]
+    records: tuple[CanonicalRecord, ...],
+    deliveries: tuple[DeliveryIntent, ...],
+    schema: TargetSchema,
 ) -> list[RecordView]:
     targets = {_attr(intent, "record_id"): _attr(intent, "target_id") for intent in deliveries}
-    refusals = {
-        _attr(intent, "record_id"): _last_delivery_detail(intent) for intent in deliveries
-    }
+    refusals = {_attr(intent, "record_id"): _last_delivery_detail(intent) for intent in deliveries}
     views: list[RecordView] = []
     for record in records:
         validation = _attr(record, "validation", ()) or ()
@@ -217,7 +221,9 @@ def _record_views(
         views.append(
             RecordView(
                 id=_attr(record, "id", ""),
-                employee_id=values.get("employeeId"),
+                # Whatever the schema calls its identity field, so a record is
+                # nameable in a migration that has nothing to do with employment.
+                employee_id=(values.get(schema.identity_field) if schema.identity_field else None),
                 values=values,
                 disposition=disposition,
                 sources=[
@@ -235,14 +241,16 @@ def _record_views(
 
 
 def _issue_views(
-    issues: tuple[ReviewIssue, ...], columns: tuple[Any, ...] = ()
+    issues: tuple[ReviewIssue, ...],
+    schema: TargetSchema,
+    columns: tuple[Any, ...] = (),
 ) -> list[IssueView]:
     by_id = {_attr(column, "id"): column for column in columns}
     views: list[IssueView] = []
     for issue in issues:
         field_name = _attr(issue, "field_name")
         column = by_id.get(_attr(issue, "column_id"))
-        spec = get_field(field_name) if field_name else None
+        spec = schema.field(field_name) if field_name else None
         resolution = _attr(issue, "resolution")
         resolved_at: Any = _attr(resolution, "resolved_at") if resolution else None
         views.append(
@@ -328,9 +336,7 @@ def _counters(state: dict[str, Any]) -> CountersView:
             if _enum_value(_attr(m, "outcome")) == MappingOutcome.AUTO_MAPPED.value
         ),
         escalated=sum(
-            1
-            for m in current
-            if _enum_value(_attr(m, "outcome")) == MappingOutcome.ESCALATED.value
+            1 for m in current if _enum_value(_attr(m, "outcome")) == MappingOutcome.ESCALATED.value
         ),
         repairs=sum(len(_attr(record, "repairs", ()) or ()) for record in records),
         model_requests=int(state.get("model_requests", 0)),
@@ -382,6 +388,9 @@ def build_run_view(
     if not isinstance(phase, RunPhase):
         phase = RunPhase(_enum_value(phase, RunPhase.INGESTED.value))
     events = state.get("events", ())
+    # The run's own snapshotted contract, so labels and the identity field match
+    # what this migration was actually validated against.
+    schema = run_schema(cast("Any", state))
 
     return RunView(
         run_id=run_id,
@@ -392,25 +401,39 @@ def build_run_view(
         active=phase in _ACTIVE_PHASES and not paused,
         files=[_attr(source, "name", "") for source in state.get("files", ())],
         counters=_counters(state),
-        mappings=_mapping_views(state),
-        issues=_issue_views(state.get("issues", ()), tuple(state.get("columns", ()))),
-        records=_record_views(state.get("records", ()), state.get("deliveries", ())),
+        mappings=_mapping_views(state, schema),
+        issues=_issue_views(state.get("issues", ()), schema, tuple(state.get("columns", ()))),
+        records=_record_views(state.get("records", ()), state.get("deliveries", ()), schema),
         events=_event_views(events, since),
         latest_seq=max((int(_attr(event, "seq", 0)) for event in events), default=0),
         blocked_reason=state.get("blocked_reason"),
+        schema_name=schema.name,
+        schema_id=schema.schema_id,
     )
 
 
-def target_schema_view() -> list[dict[str, Any]]:
-    """The target contract, so the UI can show what is being mapped onto."""
-    return [
-        {
-            "name": spec.name.value,
-            "label": spec.label,
-            "description": spec.description,
-            "required": spec.required,
-            "kind": spec.kind.value,
-            "allowed_values": list(spec.enum_values),
-        }
-        for spec in TARGET_FIELDS
-    ]
+def target_schema_view(schema: TargetSchema) -> dict[str, Any]:
+    """A schema, as the UI needs it: the fields plus what makes each one special."""
+    return {
+        "schema_id": schema.schema_id,
+        "name": schema.name,
+        "description": schema.description,
+        "version": schema.version,
+        "builtin": schema.builtin,
+        "fields": [
+            {
+                "name": spec.name,
+                "label": spec.label,
+                "description": spec.description,
+                "required": spec.required,
+                "kind": spec.kind.value,
+                "is_identity": spec.is_identity,
+                "is_unique": spec.is_unique,
+                "allowed_values": list(spec.enum_values),
+                # Read-only in the builder, but shown: seeing that "doj" will
+                # match is what tells someone their export will work.
+                "spellings": sorted(spec.spellings),
+            }
+            for spec in schema.fields
+        ],
+    }

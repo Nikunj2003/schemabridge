@@ -5,18 +5,29 @@ means. Trimming whitespace is safe. Title-casing a name is not, because it
 corrupts "McDonald", "van der Berg" and "d'Souza". Guessing a locale for an
 ambiguous date is not. Anything failing that test is reported as unrepairable
 and escalated instead of applied.
+
+Every rule here is chosen by the field's `ValueKind`, never by its name. That is
+what lets a schema nobody wrote code for still get its emails lowercased and its
+dates normalised.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from schemabridge.domain.models import AppliedRepair
 from schemabridge.domain.normalize import DateStatus, parse_calendar_date, trim_surrounding
-from schemabridge.domain.target import TargetField, ValueKind, get_field
+from schemabridge.domain.schema import TargetSchema, ValueKind
 
+#: What a record's values are, once this module has produced them.
 RecordValues = dict[str, str | None]
+
+#: What a caller may pass in. Wider than `RecordValues` because a dict is
+#: invariant in its value type, so a plain `dict[str, str]` — which every literal
+#: record in a test is — would otherwise be rejected.
+SourceValues = Mapping[str, str | None]
 
 
 @dataclass(slots=True)
@@ -27,42 +38,26 @@ class RepairResult:
     unrepairable: tuple[str, ...] = field(default_factory=tuple)
 
 
-#: Accepted spellings per enum vocabulary. Explicit by design: an unlisted
-#: spelling is escalated rather than fuzzy-matched, because deciding that
-#: "Seasonal Temp" means "contract" is a business decision, not a formatting one.
-_ENUM_ALIASES: dict[str, dict[str, str]] = {
-    TargetField.EMPLOYMENT_TYPE.value: {
-        "fulltime": "full_time",
-        "full": "full_time",
-        "permanent": "full_time",
-        "fte": "full_time",
-        "regular": "full_time",
-        "parttime": "part_time",
-        "part": "part_time",
-        "contract": "contract",
-        "contractor": "contract",
-        "contractual": "contract",
-        "temporary": "contract",
-        "temp": "contract",
-        "fixedterm": "contract",
-        "intern": "intern",
-        "internship": "intern",
-        "trainee": "intern",
-        "apprentice": "intern",
-    }
-}
-
 _SEPARATORS = re.compile(r"[\s_-]+")
 
 
-def normalize_enum_value(field_name: TargetField | str, value: str) -> str | None:
-    """Map a value onto its canonical enum member, or None if unrecognised."""
-    key = field_name.value if isinstance(field_name, TargetField) else field_name
-    table = _ENUM_ALIASES.get(key)
-    if table is None:
+def normalize_enum_value(field_name: str, value: str, *, schema: TargetSchema) -> str | None:
+    """Map a value onto its canonical enum member, or None if unrecognised.
+
+    The accepted spellings come from the field's own `value_aliases`, so a
+    user-defined enum canonicalises exactly as the built-in one does. An unlisted
+    spelling returns None and escalates: deciding that "Seasonal Temp" means
+    "contract" is a business call, not a formatting one.
+    """
+    spec = schema.field(field_name)
+    if spec is None or spec.kind is not ValueKind.ENUM:
         return None
     normalized = _SEPARATORS.sub("", trim_surrounding(value).lower())
-    return table.get(normalized)
+    # An exact member always wins over an alias table that might disagree.
+    for member in spec.enum_values:
+        if _SEPARATORS.sub("", member.lower()) == normalized:
+            return member
+    return spec.value_aliases.get(normalized)
 
 
 def _normalize_email(value: str) -> str:
@@ -73,7 +68,7 @@ def _normalize_email(value: str) -> str:
     return value[:at] + "@" + value[at + 1 :].lower()
 
 
-def apply_safe_repairs(source: RecordValues) -> RepairResult:
+def apply_safe_repairs(source: SourceValues, *, schema: TargetSchema) -> RepairResult:
     """Apply every safe repair, reporting exactly what changed.
 
     Idempotent: applying the result again produces no further repairs.
@@ -99,7 +94,7 @@ def apply_safe_repairs(source: RecordValues) -> RepairResult:
         if not trimmed:
             continue
 
-        spec = get_field(name)
+        spec = schema.field(name)
         if spec is None:
             continue
 
@@ -113,7 +108,7 @@ def apply_safe_repairs(source: RecordValues) -> RepairResult:
                 # No safe reading. Leave it exactly as the client wrote it.
                 unrepairable.append(name)
         elif spec.kind is ValueKind.ENUM:
-            canonical = normalize_enum_value(spec.name, trimmed)
+            canonical = normalize_enum_value(name, trimmed, schema=schema)
             if canonical is not None:
                 record(name, "canonicalize_enum", trimmed, canonical)
             else:

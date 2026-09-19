@@ -39,15 +39,21 @@ def _employee_schema(*, curated: bool = False) -> TargetSchema:
     }
     fields = [
         TargetFieldSpec(
-            name="employeeId", label="Employee ID", kind=ValueKind.IDENTIFIER,
-            required=True, is_identity=True,
+            name="employeeId",
+            label="Employee ID",
+            kind=ValueKind.IDENTIFIER,
+            required=True,
+            is_identity=True,
         ),
         TargetFieldSpec(
             name="fullName", label="Full name", kind=ValueKind.PERSON_NAME, required=True
         ),
         TargetFieldSpec(
-            name="workEmail", label="Work email", kind=ValueKind.EMAIL,
-            required=True, is_unique=True,
+            name="workEmail",
+            label="Work email",
+            kind=ValueKind.EMAIL,
+            required=True,
+            is_unique=True,
         ),
         TargetFieldSpec(name="startDate", label="Start date", kind=ValueKind.DATE, required=True),
         TargetFieldSpec(
@@ -55,7 +61,9 @@ def _employee_schema(*, curated: bool = False) -> TargetSchema:
         ),
         TargetFieldSpec(name="department", label="Department", kind=ValueKind.TEXT),
         TargetFieldSpec(
-            name="employmentType", label="Employment type", kind=ValueKind.ENUM,
+            name="employmentType",
+            label="Employment type",
+            kind=ValueKind.ENUM,
             enum_values=("full_time", "part_time", "contract", "intern"),
         ),
     ]
@@ -236,15 +244,22 @@ class TestACompletelyDifferentSchema:
             name="Order",
             fields=(
                 TargetFieldSpec(
-                    name="orderId", label="Order ID", kind=ValueKind.IDENTIFIER,
-                    required=True, is_identity=True,
+                    name="orderId",
+                    label="Order ID",
+                    kind=ValueKind.IDENTIFIER,
+                    required=True,
+                    is_identity=True,
                 ),
                 TargetFieldSpec(
-                    name="customerEmail", label="Customer email", kind=ValueKind.EMAIL,
+                    name="customerEmail",
+                    label="Customer email",
+                    kind=ValueKind.EMAIL,
                     required=True,
                 ),
                 TargetFieldSpec(
-                    name="status", label="Status", kind=ValueKind.ENUM,
+                    name="status",
+                    label="Status",
+                    kind=ValueKind.ENUM,
                     enum_values=("open", "shipped", "cancelled"),
                 ),
             ),

@@ -9,7 +9,17 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
-from schemabridge.domain.models import Disposition, IssueStatus, MappingOutcome, RunPhase
+from schemabridge.domain.models import (
+    ColumnProfile,
+    Disposition,
+    IssueStatus,
+    MappingOutcome,
+    RunPhase,
+    SourceColumn,
+    SourceFile,
+    SourceRow,
+)
+from schemabridge.domain.target import BUILTIN_SCHEMA
 from schemabridge.graph.builder import compile_graph
 from schemabridge.ingest.csv_source import parse_csv
 from schemabridge.ingest.profile import profile_columns
@@ -20,7 +30,10 @@ SAMPLES = Path(__file__).resolve().parents[2] / "fixtures" / "samples"
 
 def initial_state(names: list[str]) -> dict[str, Any]:
     """Build the starting state from sample files, as ingestion will."""
-    files, columns, rows, profiles = [], [], [], []
+    files: list[SourceFile] = []
+    columns: list[SourceColumn] = []
+    rows: list[SourceRow] = []
+    profiles: list[ColumnProfile] = []
     for index, name in enumerate(names):
         file_id = f"f{index}"
         path = SAMPLES / name
@@ -49,6 +62,8 @@ def initial_state(names: list[str]) -> dict[str, Any]:
         "resolutions": {},
         "model_requests": 0,
         "phase": RunPhase.INGESTED,
+        # The contract this run maps onto, snapshotted exactly as the API does.
+        "target_schema": BUILTIN_SCHEMA,
     }
 
 

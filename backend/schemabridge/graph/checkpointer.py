@@ -14,7 +14,7 @@ from typing import Any
 from langgraph.checkpoint.mongodb import MongoDBSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
-from schemabridge.domain import models, target
+from schemabridge.domain import models, schema, target
 from schemabridge.server.config import get_settings
 from schemabridge.server.mongo import get_client
 
@@ -59,7 +59,10 @@ _ALLOWED_TYPES: tuple[type, ...] = (
     models.ValidationPass,
     models.ValidationPassLabel,
     target.TargetField,
-    target.ValueKind,
+    # Only the outer class needs listing: nested models, frozensets and tuples
+    # ride along on it. Verified rather than assumed.
+    schema.TargetSchema,
+    schema.ValueKind,
 )
 
 

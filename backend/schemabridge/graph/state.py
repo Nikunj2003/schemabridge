@@ -24,6 +24,7 @@ from schemabridge.domain.models import (
     SourceFile,
     SourceRow,
 )
+from schemabridge.domain.schema import TargetSchema
 
 
 def append[T](existing: Sequence[T] | None, incoming: Sequence[T] | T | None) -> tuple[T, ...]:
@@ -98,6 +99,10 @@ class MigrationState(TypedDict, total=False):
     run_id: str
     owner_session_id: str
     policy_version: str
+    #: The contract this run maps onto, snapshotted at creation rather than
+    #: referenced by id. Editing a saved schema must not change what a paused run
+    #: is validated against: a migration's contract is fixed when it starts.
+    target_schema: TargetSchema
 
     # --- Source data ----------------------------------------------------
     files: tuple[SourceFile, ...]
@@ -138,3 +143,29 @@ def next_sequence(state: MigrationState) -> int:
     """The next audit sequence number for this run."""
     events = state.get("events", ())
     return (max((event.seq for event in events), default=0)) + 1
+
+
+def run_schema(state: MigrationState) -> TargetSchema:
+    """The contract this run maps onto.
+
+    Falls back to the built-in template for a run checkpointed before schemas
+    became part of the state, so an in-flight migration is not stranded by the
+    upgrade. A checkpoint that round-tripped through a serializer without the
+    type registered comes back as a plain dict, so that case is revived too
+    rather than crashing on attribute access.
+    """
+    from schemabridge.domain.target import BUILTIN_SCHEMA
+
+    # Typed as Any deliberately: the annotation promises a TargetSchema, but a
+    # checkpoint written before this field existed has nothing, and one that
+    # round-tripped through a serializer lacking the type comes back as a plain
+    # dict. Both are real states to survive, so the check is a runtime one.
+    stored: Any = state.get("target_schema")
+    if isinstance(stored, TargetSchema):
+        return stored
+    if isinstance(stored, dict):
+        try:
+            return TargetSchema.model_validate(stored)
+        except Exception:
+            return BUILTIN_SCHEMA
+    return BUILTIN_SCHEMA

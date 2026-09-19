@@ -1,10 +1,15 @@
-"""Validation against the target schema, and the two-pass repair policy.
+"""Validation against a target schema, and the two-pass repair policy.
 
 A record is evaluated at most twice: once as mapped, and once more after a
 single bounded pass of safe repairs. Failing both produces an escalation
 carrying *both* error sets, so the reviewer can see what was attempted. There is
 deliberately no third attempt and no model in the repair path — retrying a value
 the rules cannot fix only burns budget and delays the human who must decide.
+
+The rules beyond JSON Schema are driven by the schema's own declarations rather
+than by field names: stricter email syntax applies to every EMAIL-kind field, and
+date ordering to every field declaring `not_before`. A user's schema therefore
+gets the same checks the built-in template does.
 """
 
 from __future__ import annotations
@@ -17,16 +22,14 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as JsonSchemaError
 
-from schemabridge.domain.cleanup import RecordValues, apply_safe_repairs
+from schemabridge.domain.cleanup import RecordValues, SourceValues, apply_safe_repairs
 from schemabridge.domain.models import (
     AppliedRepair,
     ValidationError,
     ValidationPass,
     ValidationPassLabel,
 )
-from schemabridge.domain.target import REQUIRED_FIELDS, target_schema
-
-_REQUIRED_NAMES = frozenset(field.value for field in REQUIRED_FIELDS)
+from schemabridge.domain.schema import TargetSchema, ValueKind
 
 #: The schema's own "email" format check only looks for a single "@", so it
 #: accepts "a@b" and "x@@y..z". A migration that lets those through produces
@@ -40,10 +43,30 @@ _EMAIL_SYNTAX = re.compile(
 )
 
 
-@lru_cache(maxsize=1)
-def _validator() -> Draft202012Validator:
-    """Compiled schema validator, including format checks such as email."""
-    return Draft202012Validator(target_schema(), format_checker=Draft202012Validator.FORMAT_CHECKER)
+@lru_cache(maxsize=32)
+def _validator_for(schema_id: str, version: int, serialised: str) -> Draft202012Validator:
+    """Compiled validator, cached per schema revision.
+
+    Keyed on the serialised schema rather than the object, because a
+    `TargetSchema` is not hashable and two equal schemas should share a
+    validator. The id and version are part of the key so an edit cannot be served
+    a stale validator — the real risk of caching this at all.
+    """
+    import json
+
+    return Draft202012Validator(
+        json.loads(serialised), format_checker=Draft202012Validator.FORMAT_CHECKER
+    )
+
+
+def _validator(schema: TargetSchema) -> Draft202012Validator:
+    import json
+
+    return _validator_for(
+        schema.schema_id,
+        schema.version,
+        json.dumps(schema.json_schema, sort_keys=True),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,8 +103,9 @@ def _describe(error: JsonSchemaError) -> ValidationError:
     return ValidationError(field_name=name, code=keyword, message=message)
 
 
-def _for_validation(values: RecordValues) -> dict[str, Any]:
+def _for_validation(values: SourceValues, schema: TargetSchema) -> dict[str, Any]:
     """Drop absent optionals so "not supplied" is distinct from "empty"."""
+    required = schema.required_names
     candidate: dict[str, Any] = {}
     for name, value in values.items():
         if value is None:
@@ -89,40 +113,52 @@ def _for_validation(values: RecordValues) -> dict[str, Any]:
         if value == "":
             # An empty required field is still an error the schema must catch;
             # an empty optional simply was not supplied.
-            if name in _REQUIRED_NAMES:
+            if name in required:
                 candidate[name] = value
             continue
         candidate[name] = value
     return candidate
 
 
-def validate_employee(values: RecordValues) -> ValidationOutcome:
-    """Validate one record against the schema plus cross-field rules."""
-    candidate = _for_validation(values)
-    errors = [_describe(error) for error in _validator().iter_errors(candidate)]
+def validate_record(values: SourceValues, *, schema: TargetSchema) -> ValidationOutcome:
+    """Validate one record against a schema plus its cross-field rules."""
+    candidate = _for_validation(values, schema)
+    errors = [_describe(error) for error in _validator(schema).iter_errors(candidate)]
 
-    # Stricter email syntax than the schema's format check provides.
-    email = candidate.get("workEmail")
-    if isinstance(email, str) and email and not _EMAIL_SYNTAX.match(email):
-        errors.append(
-            ValidationError(
-                field_name="workEmail",
-                code="email_syntax",
-                message=f'"{email}" is not a usable email address.',
-            )
-        )
+    for spec in schema.fields:
+        value = candidate.get(spec.name)
 
-    # Cross-field rule JSON Schema cannot express: employment cannot end
-    # before it began.
-    start, end = candidate.get("startDate"), candidate.get("endDate")
-    if isinstance(start, str) and isinstance(end, str) and end < start:
-        errors.append(
-            ValidationError(
-                field_name="endDate",
-                code="end_before_start",
-                message=f"End date {end} is before start date {start}.",
+        # Stricter email syntax than the schema's format check provides.
+        if (
+            spec.kind is ValueKind.EMAIL
+            and isinstance(value, str)
+            and value
+            and not _EMAIL_SYNTAX.match(value)
+        ):
+            errors.append(
+                ValidationError(
+                    field_name=spec.name,
+                    code="email_syntax",
+                    message=f'"{value}" is not a usable email address.',
+                )
             )
-        )
+
+        # A comparison between two properties, which JSON Schema cannot express:
+        # a period cannot end before it began.
+        if spec.not_before:
+            earlier = candidate.get(spec.not_before)
+            if isinstance(value, str) and isinstance(earlier, str) and value < earlier:
+                other = schema.field(spec.not_before)
+                errors.append(
+                    ValidationError(
+                        field_name=spec.name,
+                        code="end_before_start",
+                        message=(
+                            f"{spec.label} {value} is before "
+                            f"{other.label if other else spec.not_before} {earlier}."
+                        ),
+                    )
+                )
 
     seen: set[tuple[str | None, str]] = set()
     unique: list[ValidationError] = []
@@ -148,13 +184,13 @@ class TwoPassResult:
     no_repair_available: bool
 
 
-def run_validation_passes(source: RecordValues) -> TwoPassResult:
+def run_validation_passes(source: SourceValues, *, schema: TargetSchema) -> TwoPassResult:
     """Evaluate a record at most twice, with one bounded repair pass between.
 
     Returns after the first pass when the record is already valid, so clean data
     is never needlessly rewritten.
     """
-    first = validate_employee(source)
+    first = validate_record(source, schema=schema)
     first_pass = ValidationPass(
         label=ValidationPassLabel.AS_MAPPED, valid=first.valid, errors=first.errors
     )
@@ -169,8 +205,8 @@ def run_validation_passes(source: RecordValues) -> TwoPassResult:
             no_repair_available=False,
         )
 
-    repaired = apply_safe_repairs(source)
-    second = validate_employee(repaired.values)
+    repaired = apply_safe_repairs(source, schema=schema)
+    second = validate_record(repaired.values, schema=schema)
     second_pass = ValidationPass(
         label=ValidationPassLabel.AFTER_REPAIR, valid=second.valid, errors=second.errors
     )

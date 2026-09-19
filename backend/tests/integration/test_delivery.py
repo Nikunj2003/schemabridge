@@ -20,12 +20,29 @@ import pytest
 import uvicorn
 
 from schemabridge.domain.models import CanonicalRecord, DeliveryOutcome, DeliveryState
+from schemabridge.domain.target import BUILTIN_SCHEMA
 from schemabridge.server.target_client import (
     build_client,
-    build_payload,
-    deliver_record,
     idempotency_key,
 )
+from schemabridge.server.target_client import (
+    build_payload as _build_payload,
+)
+from schemabridge.server.target_client import (
+    deliver_record as _deliver_record,
+)
+
+
+def build_payload(record_: CanonicalRecord) -> dict[str, Any]:
+    """Payload for the built-in template, which these deliveries target."""
+    return _build_payload(record_, schema=BUILTIN_SCHEMA)
+
+
+def deliver_record(*args: Any, **kwargs: Any) -> Any:
+    """Deliver against the built-in template unless a case names another."""
+    kwargs.setdefault("schema", BUILTIN_SCHEMA)
+    return _deliver_record(*args, **kwargs)
+
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("MONGODB_URI"),

@@ -34,6 +34,7 @@ from schemabridge.domain.models import (
     DeliveryOutcome,
     DeliveryState,
 )
+from schemabridge.domain.schema import TargetSchema
 from schemabridge.server.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -46,29 +47,30 @@ MAX_ATTEMPTS = 3
 #: wrong, so repeating it unchanged cannot help.
 _RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 
-_DELIVERABLE_FIELDS = (
-    "employeeId",
-    "fullName",
-    "workEmail",
-    "startDate",
-    "endDate",
-    "department",
-    "employmentType",
-)
+#: Names the contract the destination validates against, so a run using a custom
+#: schema is not checked against the built-in one.
+SCHEMA_HEADER = "X-Target-Schema"
 
 
-def build_payload(record: CanonicalRecord) -> dict[str, Any]:
+def build_payload(record: CanonicalRecord, *, schema: TargetSchema) -> dict[str, Any]:
     """The record as the destination expects it.
 
+    The field list comes from the run's own schema rather than a constant here.
+    A second hardcoded list was the bug waiting to happen: it was checked against
+    nothing, so adding a field to the schema would have silently dropped it from
+    every delivery.
+
     Absent optional fields are omitted rather than sent as null, so the
-    destination sees "not supplied" instead of "explicitly empty".
+    destination sees "not supplied" instead of "explicitly empty". Values the
+    schema does not define are dropped: sending them would invent data the
+    destination never asked for, and its contract forbids extra properties.
     """
     payload: dict[str, Any] = {}
-    for name in _DELIVERABLE_FIELDS:
-        value = record.values.get(name)
+    for spec in schema.fields:
+        value = record.values.get(spec.name)
         if value is None or value == "":
             continue
-        payload[name] = value
+        payload[spec.name] = value
     return payload
 
 
@@ -155,19 +157,24 @@ def deliver_record(
     run_id: str,
     record: CanonicalRecord,
     *,
+    schema: TargetSchema,
     request_origin: str | None = None,
     attempt_number: int = 1,
     demo_headers: dict[str, str] | None = None,
 ) -> DeliveryResult:
     """Send one record, classifying the outcome honestly."""
     settings = get_settings()
-    payload = build_payload(record)
+    payload = build_payload(record, schema=schema)
     key = idempotency_key(run_id, record)
 
     headers = {
         "Authorization": f"Bearer {settings.target_api_secret}",
         "Idempotency-Key": key,
         "Content-Type": "application/json",
+        # Which contract the destination should enforce. Safe as a header only
+        # because this endpoint is authenticated with a server-side shared secret
+        # — unlike the delivery origin, which is never taken from a header.
+        SCHEMA_HEADER: schema.schema_id,
     }
     if demo_headers:
         headers.update(demo_headers)

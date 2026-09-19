@@ -6,17 +6,19 @@ receives a summary and returns a suggestion, and the application decides what to
 do with it.
 
 Prompt content is untrusted. Headers and sample values come from an uploaded
-file, so they are treated as data: bounded in size, never interpolated into
-instructions that could change the model's task.
+file, so every one of them passes through `agent.sanitize` before it reaches a
+prompt: structure neutralised, length capped, invisible characters stripped. See
+that module for what this does and does not defend against.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from schemabridge.agent.sanitize import safe_value
 from schemabridge.domain.models import ColumnProfile, SourceColumn
 from schemabridge.domain.normalize import detect_value_kinds
-from schemabridge.domain.target import TARGET_FIELDS, ValueKind, get_field
+from schemabridge.domain.schema import TargetSchema, ValueKind
 
 #: Compatible value kinds per target kind, mirroring the deterministic policy.
 _COMPATIBLE: dict[ValueKind, frozenset[ValueKind]] = {
@@ -31,18 +33,38 @@ _COMPATIBLE: dict[ValueKind, frozenset[ValueKind]] = {
 }
 
 _MAX_SAMPLES = 3
-_MAX_SAMPLE_LENGTH = 60
 
 
-def describe_target_schema() -> str:
-    """The target fields, as the model needs to see them."""
-    lines = ["Permitted target fields:"]
-    for spec in TARGET_FIELDS:
+def describe_target_schema(schema: TargetSchema, *, exclude: set[str] | None = None) -> str:
+    """The target fields, as the model needs to see them.
+
+    Fields already supplied by another column are left out rather than listed and
+    forbidden: a field the model cannot see is one it cannot propose, which is
+    more reliable than a rule telling it not to.
+    """
+    taken = exclude or set()
+    lines = [f"Target schema: {schema.name}"]
+    if schema.description:
+        lines.append(schema.description)
+    lines.append("")
+    lines.append("Permitted target fields:")
+    for spec in schema.fields:
+        if spec.name in taken:
+            continue
         requirement = "required" if spec.required else "optional"
-        detail = f"- {spec.name.value} ({requirement}, {spec.kind.value}): {spec.description}"
+        detail = f"- {spec.name} ({requirement}, {spec.kind.value})"
+        if spec.description:
+            detail += f": {spec.description}"
         if spec.enum_values:
             detail += f" Allowed values: {', '.join(spec.enum_values)}."
         lines.append(detail)
+    if taken:
+        lines.append("")
+        lines.append(
+            "Already supplied by another column, so not available: "
+            + ", ".join(sorted(taken))
+            + "."
+        )
     return "\n".join(lines)
 
 
@@ -50,21 +72,25 @@ def describe_columns(columns: list[SourceColumn], profiles: dict[str, ColumnProf
     """Summarise the columns awaiting a decision.
 
     Deliberately a profile, not the data: headers, detected shape, how full the
-    column is, and a few short examples. The model never sees the dataset.
+    column is, how many distinct values it holds, and a few short examples. The
+    model never sees the dataset.
+
+    Fill rate and distinctness are included because they are the evidence that
+    contradicts a header. A column called "Employee ID" that is 4% filled, or one
+    holding three distinct values across two hundred rows, is not an identifier
+    whatever it is called — and saying so is more useful than asking the model to
+    trust the name.
     """
     lines = ["Source columns needing a mapping:"]
     for column in columns:
         profile = profiles.get(column.id)
-        parts = [f'- id={column.id} header="{column.header}"']
+        parts = [f"- id={column.id} header={safe_value(column.header)}"]
         if profile:
             kinds = profile.detected_kinds or tuple(detect_value_kinds(list(profile.samples)))
-            shape = kinds[0].value if kinds else "unknown"
-            samples = ", ".join(
-                (s if len(s) <= _MAX_SAMPLE_LENGTH else f"{s[:_MAX_SAMPLE_LENGTH]}...")
-                for s in profile.samples[:_MAX_SAMPLES]
-            )
-            parts.append(f"shape={shape}")
+            parts.append(f"shape={kinds[0].value if kinds else 'unknown'}")
             parts.append(f"filled={profile.non_empty_count}/{profile.total_count}")
+            parts.append(f"distinct={profile.distinct_count}")
+            samples = ", ".join(safe_value(s) for s in profile.samples[:_MAX_SAMPLES])
             if samples:
                 parts.append(f"examples=[{samples}]")
         lines.append(" ".join(parts))
@@ -86,6 +112,8 @@ def check_proposed_mapping(
     profile: ColumnProfile | None,
     target: str,
     already_taken: set[str],
+    *,
+    schema: TargetSchema,
 ) -> CheckedMapping:
     """Verify a proposal against deterministic evidence.
 
@@ -96,7 +124,7 @@ def check_proposed_mapping(
     """
     evidence: list[str] = []
 
-    spec = get_field(target)
+    spec = schema.field(target)
     if spec is None:
         return CheckedMapping(
             column.id, target, False, (f'"{target}" is not a field in the target schema.',)

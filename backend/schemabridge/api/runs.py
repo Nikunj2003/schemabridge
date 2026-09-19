@@ -26,10 +26,11 @@ import logging
 from dataclasses import asdict
 from typing import Annotated, Any
 
-from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile, status
 from starlette.concurrency import run_in_threadpool
 
 from schemabridge.api.views import RunView, build_run_view, target_schema_view
+from schemabridge.domain.infer import infer_schema
 from schemabridge.domain.models import (
     ColumnProfile,
     RunPhase,
@@ -37,12 +38,15 @@ from schemabridge.domain.models import (
     SourceFile,
     SourceRow,
 )
+from schemabridge.domain.schema import TargetSchema
+from schemabridge.domain.target import BUILTIN_SCHEMA
 from schemabridge.graph import runner
 from schemabridge.ingest.csv_source import parse_csv
 from schemabridge.ingest.limits import INGEST_LIMITS
 from schemabridge.ingest.profile import profile_columns
 from schemabridge.ingest.xlsx_source import parse_xlsx
 from schemabridge.server import runs as registry
+from schemabridge.server import schemas as schema_store
 from schemabridge.server.budget import usage_today
 from schemabridge.server.sessions import ensure_session, read_session
 
@@ -102,9 +106,46 @@ def _request_origin(request: Request) -> str:
 
 @router.get("/schema")
 def read_schema() -> dict[str, Any]:
-    """The target contract the migration maps onto."""
+    """The default target contract, and the ingest limits.
+
+    The built-in template, so the tables have column headers before a run exists.
+    A run's own contract travels on the run itself, since it may be a saved schema
+    or one detected from the upload.
+    """
+    view = target_schema_view(BUILTIN_SCHEMA)
     # asdict, not vars: the limits are a slotted dataclass and have no __dict__.
-    return {"fields": target_schema_view(), "limits": asdict(INGEST_LIMITS)}
+    return {**view, "fields": view["fields"], "limits": asdict(INGEST_LIMITS)}
+
+
+def _resolve_schema(
+    schema_id: str | None,
+    session_id: str,
+    columns: list[SourceColumn],
+    profiles: list[ColumnProfile],
+) -> TargetSchema:
+    """Which contract this run maps onto.
+
+    Three ways in, matching the three ways a consultant actually arrives: a
+    contract they have saved, no contract at all (detect one from the file), or
+    the shipped template as a sensible default.
+    """
+    if not schema_id or schema_id == BUILTIN_SCHEMA.schema_id:
+        return BUILTIN_SCHEMA
+    if schema_id == "detected":
+        return infer_schema(columns, profiles)
+    try:
+        record = schema_store.find_schema(schema_id, session_id)
+    except Exception as error:
+        logger.warning("schema store unavailable: %s", type(error).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The chosen schema could not be loaded, so the migration did not start.",
+        ) from None
+    if record is None:
+        # Refused rather than silently falling back: migrating against a
+        # different contract than the one asked for is worse than not starting.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such schema.")
+    return record.schema
 
 
 @router.get("/usage")
@@ -122,8 +163,13 @@ async def create_run(
     request: Request,
     response: Response,
     files: Annotated[list[UploadFile], File()],
+    schema_id: Annotated[str | None, Form()] = None,
 ) -> RunView:
-    """Ingest source files and start a migration."""
+    """Ingest source files and start a migration.
+
+    `schema_id` picks the contract: a saved schema's id, "detected" to derive one
+    from the uploaded headers, or omitted for the built-in template.
+    """
     _same_origin(request)
     session_id = ensure_session(request, response)
 
@@ -207,6 +253,8 @@ async def create_run(
             detail=f"{len(rows)} rows exceeds the limit of {INGEST_LIMITS.max_total_rows}.",
         )
 
+    schema = _resolve_schema(schema_id, session_id, columns, profiles)
+
     run_id = registry.new_run_id()
     registry.create_run(run_id, session_id, tuple(names), len(rows))
 
@@ -227,6 +275,9 @@ async def create_run(
         "phase": RunPhase.INGESTED,
         "request_origin": _request_origin(request),
         "demo_delivery": _DEMO_DELIVERY,
+        # Snapshotted, not referenced: editing the saved schema later must not
+        # change what this run is validated against.
+        "target_schema": schema,
     }
 
     # Off the event loop: the workflow delivers over HTTP to this same app.

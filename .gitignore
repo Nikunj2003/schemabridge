@@ -15,6 +15,9 @@
 /*.pptx
 /SchemaBridge_PRD_Architecture.html
 /docs/private/
+# Exported session transcripts, which carry local working notes verbatim.
+/*-i-want-you-to-*.txt
+/2???-??-??-*.txt
 
 # Local agent and editor configuration.
 /.claude/

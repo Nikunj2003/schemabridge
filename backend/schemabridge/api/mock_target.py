@@ -7,13 +7,20 @@ halfway. So this stub:
 - requires a shared secret, so it is not an open write endpoint;
 - enforces idempotency, returning the original receipt on a replay;
 - refuses a reused key carrying different data;
-- validates against the target schema and rejects what does not conform;
+- validates against the target schema the run names, rejecting what does not
+  conform;
 - fails one designated record once, then accepts it, to exercise retry;
 - rejects another permanently, to exercise a failure a human must act on.
 
 The failure behaviour is driven by an explicit header the engine never sends on
 its own, rather than by magic employee ids, so production logic contains no
 special cases for test data.
+
+Which contract to enforce arrives in a header. That is safe *here* and nowhere
+else in this codebase: the endpoint already requires a server-side shared secret,
+so the header cannot come from a browser. It is looked up server-side and falls
+back to the built-in template, so an unknown id is refused by a real contract
+rather than waved through.
 """
 
 from __future__ import annotations
@@ -26,13 +33,17 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
-from schemabridge.domain.validate import validate_employee
+from schemabridge.domain.schema import TargetSchema
+from schemabridge.domain.target import BUILTIN_SCHEMA, BUILTIN_SCHEMA_ID
+from schemabridge.domain.validate import validate_record
+from schemabridge.server import schemas as schema_store
 from schemabridge.server.config import get_settings
 from schemabridge.server.receipts import (
     PayloadConflictError,
     find_receipt,
     store_receipt,
 )
+from schemabridge.server.target_client import SCHEMA_HEADER
 
 router = APIRouter(prefix="/api/mock/destination", tags=["mock destination"])
 
@@ -43,6 +54,24 @@ _REJECT_HEADER = "x-demo-reject"
 
 #: Keys already failed once, so the second attempt can succeed.
 _failed_once: set[str] = set()
+
+
+def _contract(schema_id: str | None) -> TargetSchema:
+    """The schema this request should be validated against.
+
+    Unknown or absent falls back to the built-in template rather than skipping
+    validation: a destination that accepts anything when it cannot identify the
+    contract is worse than one that applies the wrong one, because the caller
+    never learns something was wrong.
+    """
+    if not schema_id or schema_id == BUILTIN_SCHEMA_ID:
+        return BUILTIN_SCHEMA
+    try:
+        stored = schema_store.find_schema_unowned(schema_id)
+    except Exception:
+        # A database problem must not turn into an accepted record.
+        return BUILTIN_SCHEMA
+    return stored or BUILTIN_SCHEMA
 
 
 def _require_secret(provided: str | None) -> None:
@@ -75,6 +104,7 @@ async def create_employee(
     authorization: Annotated[str | None, Header()] = None,
     fail_once: Annotated[str | None, Header(alias=_FAIL_ONCE_HEADER)] = None,
     reject: Annotated[str | None, Header(alias=_REJECT_HEADER)] = None,
+    target_schema: Annotated[str | None, Header(alias=SCHEMA_HEADER)] = None,
 ) -> JSONResponse:
     """Accept one employee record."""
     token = authorization.removeprefix("Bearer ").strip() if authorization else None
@@ -116,7 +146,7 @@ async def create_employee(
         )
 
     # The destination enforces its own contract; it does not trust the caller.
-    outcome = validate_employee(payload)
+    outcome = validate_record(payload, schema=_contract(target_schema))
     if not outcome.valid:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,

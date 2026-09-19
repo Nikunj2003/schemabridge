@@ -1,8 +1,13 @@
 @import "tailwindcss";
 
 /*
- * Design tokens adapted from the author's own codenex-ui project (MIT).
- * See THIRD_PARTY_NOTICES.md.
+ * Design tokens.
+ *
+ * Light-first: this product is read like a document — source values, employee
+ * records, decisions — and dark surfaces make dense tabular text harder to scan.
+ * Dark mode is a deliberate second theme with its own steps, not an inversion.
+ *
+ * Adapted from the author's codenex-ui project (MIT). See THIRD_PARTY_NOTICES.
  */
 
 @custom-variant dark (&:where(.dark, .dark *));
@@ -11,118 +16,140 @@
   --font-display: var(--font-space-grotesk), ui-sans-serif, system-ui, sans-serif;
   --font-body: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
 
-  --background: hsl(35 10% 98%);
-  --foreground: hsl(174 25% 12%);
-  --card: hsl(0 0% 100%);
-  --card-foreground: hsl(174 25% 12%);
-  --popover: hsl(0 0% 100%);
-  --popover-foreground: hsl(174 25% 12%);
-  --primary: hsl(173.7 44.2% 42.2%);
-  --primary-foreground: hsl(0 0% 100%);
-  --secondary: hsl(174 15% 94%);
-  --secondary-foreground: hsl(174 30% 20%);
-  --muted: hsl(174 15% 94%);
-  --muted-foreground: hsl(174 15% 38%);
-  --accent: hsl(174 25% 90%);
-  --accent-foreground: hsl(174 50% 25%);
-  --destructive: hsl(0 65% 44%);
-  --destructive-foreground: hsl(0 0% 100%);
-  --success: hsl(162 55% 34%);
-  --success-foreground: hsl(0 0% 100%);
-  --warning: hsl(38 92% 38%);
-  --warning-foreground: hsl(0 0% 100%);
-  --border: hsl(174 15% 90%);
-  --input: hsl(174 15% 90%);
-  --ring: hsl(173.7 44.2% 42.2%);
-  --radius: 0.5rem;
+  /* Paper and ink. Warm off-white rather than pure white: long reading. */
+  --canvas: #fafaf9;
+  --surface: #ffffff;
+  --surface-sunken: #f4f6f6;
+  --ink: #172625;
+  --ink-muted: #5a6b6a;
+  --ink-subtle: #7d8c8b;
+
+  /* Teal carries the product's identity and marks the active path. */
+  --accent: #2f7d75;
+  --accent-hover: #276a63;
+  --accent-soft: #eaf3f2;
+  --accent-ink: #1d554f;
+
+  --line: #e2e9e9;
+  --line-strong: #cfdada;
+
+  /* Status. Each ships with a word in the UI, never colour alone. */
+  --ok: #1f7a4d;
+  --ok-soft: #e9f5ee;
+  --attention: #9a5b00;
+  --attention-soft: #fdf3e4;
+  --problem: #ab2e2e;
+  --problem-soft: #fbecec;
+
+  --radius: 0.625rem;
+  --shadow-card: 0 1px 2px rgb(23 38 37 / 0.04), 0 2px 8px -4px rgb(23 38 37 / 0.06);
+  --shadow-lift: 0 2px 4px rgb(23 38 37 / 0.05), 0 12px 28px -12px rgb(23 38 37 / 0.12);
 }
 
 .dark {
-  --background: hsl(210 15% 8%);
-  --foreground: hsl(30 12% 90%);
-  --card: hsl(210 15% 10%);
-  --card-foreground: hsl(30 12% 90%);
-  --popover: hsl(210 15% 10%);
-  --popover-foreground: hsl(30 12% 90%);
-  --primary: hsl(174 42% 50%);
-  --primary-foreground: hsl(210 15% 8%);
-  --secondary: hsl(210 10% 16%);
-  --secondary-foreground: hsl(30 10% 82%);
-  --muted: hsl(210 10% 14%);
-  --muted-foreground: hsl(210 10% 65%);
-  --accent: hsl(180 22% 13%);
-  --accent-foreground: hsl(180 45% 60%);
-  --destructive: hsl(0 58% 52%);
-  --destructive-foreground: hsl(0 0% 100%);
-  --success: hsl(162 50% 48%);
-  --success-foreground: hsl(210 15% 8%);
-  --warning: hsl(38 85% 58%);
-  --warning-foreground: hsl(210 15% 8%);
-  --border: hsl(210 10% 18%);
-  --input: hsl(210 10% 18%);
-  --ring: hsl(174 42% 50%);
+  --canvas: #111417;
+  --surface: #16191d;
+  --surface-sunken: #1b1f24;
+  --ink: #e8edec;
+  --ink-muted: #a3b1b0;
+  --ink-subtle: #7f8d8c;
+
+  --accent: #4fb3a7;
+  --accent-hover: #63c2b6;
+  --accent-soft: #15302e;
+  --accent-ink: #8fd6cc;
+
+  --line: #262c31;
+  --line-strong: #364046;
+
+  --ok: #4fbd84;
+  --ok-soft: #12291d;
+  --attention: #e0a14a;
+  --attention-soft: #2c2216;
+  --problem: #e97b7b;
+  --problem-soft: #2e1a1a;
+
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.3), 0 2px 8px -4px rgb(0 0 0 / 0.4);
+  --shadow-lift: 0 2px 4px rgb(0 0 0 / 0.3), 0 12px 28px -12px rgb(0 0 0 / 0.5);
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-popover: var(--popover);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-sunken: var(--surface-sunken);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-subtle: var(--ink-subtle);
   --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
-  --color-success: var(--success);
-  --color-success-foreground: var(--success-foreground);
-  --color-warning: var(--warning);
-  --color-warning-foreground: var(--warning-foreground);
-  --color-border: var(--border);
-  --color-input: var(--input);
-  --color-ring: var(--ring);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-ink: var(--accent-ink);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-attention: var(--attention);
+  --color-attention-soft: var(--attention-soft);
+  --color-problem: var(--problem);
+  --color-problem-soft: var(--problem-soft);
+
   --font-display: var(--font-display);
   --font-sans: var(--font-body);
-  --radius-sm: calc(var(--radius) - 2px);
+
   --radius-md: var(--radius);
-  --radius-lg: calc(var(--radius) + 4px);
+  --radius-lg: calc(var(--radius) + 0.25rem);
+  --radius-xl: calc(var(--radius) + 0.5rem);
+
+  --shadow-card: var(--shadow-card);
+  --shadow-lift: var(--shadow-lift);
 }
 
 @layer base {
   * {
-    border-color: var(--color-border);
+    border-color: var(--color-line);
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
   }
 
   body {
-    background-color: var(--color-background);
-    color: var(--color-foreground);
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
     font-family: var(--font-sans);
+    /* 15px base: dense enough for tables, comfortable for prose. */
+    font-size: 0.9375rem;
+    line-height: 1.55;
     -webkit-font-smoothing: antialiased;
   }
 
-  h1, h2, h3, h4, h5, h6 {
+  h1, h2, h3, h4 {
     font-family: var(--font-display);
     letter-spacing: -0.02em;
+    line-height: 1.2;
   }
 
+  /* Focus is always visible. A keyboard user must never lose their place. */
   :focus-visible {
-    outline: 2px solid var(--color-ring);
+    outline: 2px solid var(--color-accent);
     outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /* Only the raw values from a spreadsheet get a monospace face. */
+  .raw {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.875em;
+    font-variant-ligatures: none;
   }
 }
 
-@layer utilities {
-  .label-caps {
-    font-size: 0.6875rem;
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+@layer components {
+  .card {
+    background-color: var(--color-surface);
+    border: 1px solid var(--color-line);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-card);
   }
 }
 
@@ -131,5 +158,6 @@
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

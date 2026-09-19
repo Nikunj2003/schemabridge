@@ -1,23 +1,30 @@
-/**
- * Status indicators.
- *
- * Every status carries a word, not only a colour: a reviewer who cannot
- * distinguish red from green still has to be able to tell a delivered record
- * from a failed one.
- */
 import { cn } from "@/lib/utils";
 
-export type Tone = "neutral" | "working" | "good" | "warn" | "bad";
+/**
+ * Status vocabulary.
+ *
+ * Every tone pairs with a word. Someone who cannot distinguish the hues must
+ * still be able to tell "sent" from "needs attention".
+ */
+export type Tone = "neutral" | "working" | "ok" | "attention" | "problem";
 
-const TONES: Record<Tone, string> = {
-  neutral: "text-muted-foreground bg-secondary border-border",
-  working: "text-primary bg-primary/[0.08] border-primary/25",
-  good: "text-success bg-success/[0.08] border-success/25",
-  warn: "text-warning bg-warning/[0.10] border-warning/30",
-  bad: "text-destructive bg-destructive/[0.08] border-destructive/25",
+const TONE: Record<Tone, string> = {
+  neutral: "border-line-strong bg-sunken text-ink-muted",
+  working: "border-accent/30 bg-accent-soft text-accent-ink",
+  ok: "border-ok/25 bg-ok-soft text-ok",
+  attention: "border-attention/30 bg-attention-soft text-attention",
+  problem: "border-problem/25 bg-problem-soft text-problem",
 };
 
-export function Pill({
+const DOT: Record<Tone, string> = {
+  neutral: "bg-ink-subtle",
+  working: "bg-accent",
+  ok: "bg-ok",
+  attention: "bg-attention",
+  problem: "bg-problem",
+};
+
+export function Badge({
   tone = "neutral",
   children,
   className,
@@ -29,9 +36,8 @@ export function Pill({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5",
-        "text-[11px] font-medium whitespace-nowrap",
-        TONES[tone],
+        "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12.5px] font-medium",
+        TONE[tone],
         className,
       )}
     >
@@ -40,27 +46,15 @@ export function Pill({
   );
 }
 
-/** A small dot, for a status that needs no word beside it. */
-export function Dot({ tone = "neutral", pulse = false }: { tone?: Tone; pulse?: boolean }) {
-  const fill: Record<Tone, string> = {
-    neutral: "bg-muted-foreground/50",
-    working: "bg-primary",
-    good: "bg-success",
-    warn: "bg-warning",
-    bad: "bg-destructive",
-  };
+export function Dot({ tone = "neutral", busy = false }: { tone?: Tone; busy?: boolean }) {
   return (
-    <span className="relative inline-flex h-1.5 w-1.5 shrink-0">
-      {pulse && (
+    <span className="relative inline-flex size-2 shrink-0" aria-hidden>
+      {busy && (
         <span
-          className={cn(
-            "absolute inline-flex h-full w-full rounded-full opacity-60",
-            fill[tone],
-            "motion-safe:animate-ping",
-          )}
+          className={cn("absolute inline-flex size-full rounded-full opacity-50 motion-safe:animate-ping", DOT[tone])}
         />
       )}
-      <span className={cn("relative inline-flex h-1.5 w-1.5 rounded-full", fill[tone])} />
+      <span className={cn("relative inline-flex size-2 rounded-full", DOT[tone])} />
     </span>
   );
 }

@@ -2,13 +2,15 @@
 
 import Link from "next/link";
 import { useState } from "react";
+import { ContentFrame } from "@/components/app/content-frame";
 import { Activity } from "@/components/run/activity";
 import { Decision } from "@/components/run/decision";
 import { Results } from "@/components/run/results";
 import { Stages } from "@/components/run/stages";
 import { ExecutionBasis } from "@/components/ui/execution-basis";
+import { Dialog } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ButtonLink } from "@/components/ui/button";
+import { Button, ButtonLink } from "@/components/ui/button";
 import { Badge } from "@/components/ui/status";
 import { headline, presentQuestion, stagesFor } from "@/lib/present";
 import { useRun } from "@/lib/use-run";
@@ -20,8 +22,8 @@ import { useRun } from "@/lib/use-run";
  * while navigation and the recorded evidence stay in place.
  */
 export function RunView({ runId }: { runId: string }) {
-  const { run, error, refreshError, saving, decide, activity } = useRun(runId);
-  const [showActivity, setShowActivity] = useState(false);
+  const { run, error, decisionError, refreshError, saving, decide, activity } = useRun(runId);
+  const [dismissedQuestion, setDismissedQuestion] = useState<string | null>(null);
 
   if (error && !run) {
     return (
@@ -42,6 +44,9 @@ export function RunView({ runId }: { runId: string }) {
   const answered = run.issues.filter((issue) => issue.status === "resolved");
   const finished = activity === "finished";
   const latest = run.events.at(-1);
+  const question = open[0] ? presentQuestion(open[0], run.records, run.schema_fields) : null;
+  const reviewOpen = question !== null && dismissedQuestion !== question.id;
+  const modelAssisted = run.events.filter((event) => event.execution_basis === "model_assisted").length;
 
   return (
     <Frame>
@@ -81,6 +86,8 @@ export function RunView({ runId }: { runId: string }) {
         <Stages stages={stages} />
       </section>
 
+      <ModelInvolvement requests={run.counters.model_requests} verifiedActions={modelAssisted} />
+
       {refreshError && (
         <p role="status" className="mt-4 rounded-md border border-attention/30 bg-attention-soft px-4 py-3 text-[13px] text-attention">
           {refreshError}
@@ -95,13 +102,10 @@ export function RunView({ runId }: { runId: string }) {
       <div className="mt-5">
         {finished ? (
           <Results run={run} />
-        ) : open.length > 0 ? (
-          <Decision
-            question={presentQuestion(open[0], run.records, run.schema_fields)}
-            onSave={(decision) => void decide(open[0].id, decision)}
-            saving={saving}
-            index={answered.length}
-            total={answered.length + open.length}
+        ) : question ? (
+          <ReviewRequired
+            question={question}
+            onOpen={() => setDismissedQuestion(null)}
           />
         ) : (
           <Working run={run} latest={latest} />
@@ -109,21 +113,29 @@ export function RunView({ runId }: { runId: string }) {
       </div>
 
       <section className="panel mt-5 overflow-hidden">
-        <button
-          onClick={() => setShowActivity(!showActivity)}
-          aria-expanded={showActivity}
-          className="flex w-full items-center gap-2 px-5 py-3 text-left text-[13.5px] font-medium hover:bg-sunken"
-        >
-          Everything the migration did
-          <span className="text-[12.5px] font-normal text-ink-muted tnum">{run.events.length} steps</span>
-          <span className="ml-auto text-ink-subtle" aria-hidden>{showActivity ? "Hide" : "Show"}</span>
-        </button>
-        {showActivity && (
-          <div className="max-h-[22rem] scroll-area border-t border-line">
-            <Activity events={run.events} />
-          </div>
-        )}
+        <div className="flex items-center gap-2 border-b border-line px-5 py-3 text-[13.5px] font-medium">
+          Migration audit
+          <span className="text-[12.5px] font-normal text-ink-muted tnum">{run.events.length} recorded steps</span>
+        </div>
+        <div className="max-h-[22rem] scroll-area"><Activity events={run.events} /></div>
       </section>
+
+      {question && (
+        <Dialog
+          open={reviewOpen}
+          onOpenChange={(next) => { if (!next) setDismissedQuestion(question.id); }}
+          title="Review question"
+        >
+          <Decision
+            question={question}
+            onSave={(decision) => void decide(question.id, decision)}
+            saving={saving}
+            error={decisionError}
+            index={answered.length}
+            total={answered.length + open.length}
+          />
+        </Dialog>
+      )}
 
       {answered.length > 0 && (
         <section className="mt-5">
@@ -139,6 +151,31 @@ export function RunView({ runId }: { runId: string }) {
         </section>
       )}
     </Frame>
+  );
+}
+
+function ModelInvolvement({ requests, verifiedActions }: { requests: number; verifiedActions: number }) {
+  const message = requests === 0
+    ? "No LLM requests were used in this migration."
+    : verifiedActions > 0
+      ? `${requests} LLM request${requests === 1 ? " was" : "s were"} attempted; ${verifiedActions} recorded action${verifiedActions === 1 ? " used" : "s used"} a verified suggestion.`
+      : `${requests} LLM request${requests === 1 ? " was" : "s were"} attempted; no suggestion was applied.`;
+  return (
+    <section className="mt-3 flex flex-wrap items-center gap-2 rounded-md border border-line bg-surface px-4 py-2.5 text-[12.5px] text-ink-muted">
+      {verifiedActions > 0 && <ExecutionBasis basis="model_assisted" compact />}
+      <span>{message} Suggestions are checked before use.</span>
+    </section>
+  );
+}
+
+function ReviewRequired({ question, onOpen }: { question: import("@/lib/present").PresentedQuestion; onOpen: () => void }) {
+  return (
+    <section className="panel px-5 py-5 sm:px-6">
+      <Badge tone="attention">Needs your judgment</Badge>
+      <h2 className="mt-3 font-display text-[20px]">{question.title}</h2>
+      <p className="mt-1 max-w-[60ch] text-[13.5px] text-ink-muted">{question.why}</p>
+      <Button className="mt-5" variant="primary" onClick={onOpen}>Review question</Button>
+    </section>
   );
 }
 
@@ -203,5 +240,5 @@ function RunSkeleton() {
 }
 
 function Frame({ children }: { children: React.ReactNode }) {
-  return <div className="mx-auto max-w-[62rem] px-4 py-6 sm:px-8 sm:py-8">{children}</div>;
+  return <ContentFrame>{children}</ContentFrame>;
 }

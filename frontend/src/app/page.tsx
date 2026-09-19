@@ -21,7 +21,7 @@ export default function LandingPage() {
       <main className="flex-1">
         <section className="marketing-hero relative overflow-hidden">
           <HexGridBackground />
-          <div className="marketing-frame relative grid items-center gap-11 py-15 sm:py-21 lg:grid-cols-[minmax(0,1fr)_minmax(22rem,28rem)] lg:gap-18">
+          <div className="marketing-frame relative grid items-center gap-11 lg:grid-cols-[minmax(0,1fr)_minmax(22rem,28rem)] lg:gap-18">
             <div className="relative z-10">
               <p className="marketing-kicker">A careful path from spreadsheet to system</p>
               <h1 className="marketing-hero-title mt-4 max-w-[16ch] font-display">
@@ -54,7 +54,7 @@ export default function LandingPage() {
         </section>
 
         <section id="how" className="marketing-section marketing-section-muted scroll-mt-16">
-          <div className="marketing-frame py-14 sm:py-18">
+          <div className="marketing-frame">
             <div className="max-w-[48rem]">
               <p className="marketing-kicker">From raw files to a reviewable result</p>
               <h2 className="marketing-section-title mt-3 font-display">A migration with a clear next step</h2>
@@ -80,7 +80,7 @@ export default function LandingPage() {
         </section>
 
         <section className="marketing-section">
-          <div className="marketing-frame grid gap-12 py-15 sm:py-20 lg:grid-cols-2 lg:gap-18">
+          <div className="marketing-frame grid gap-12 lg:grid-cols-2 lg:gap-18">
             <DecisionList
               title="It decides on its own when it is safe to"
               points={[
@@ -105,7 +105,7 @@ export default function LandingPage() {
         </section>
 
         <section id="limits" className="marketing-section marketing-section-muted scroll-mt-16">
-          <div className="marketing-frame py-14 sm:py-18">
+          <div className="marketing-frame">
             <div className="max-w-[48rem]">
               <p className="marketing-kicker">The boundary is part of the product</p>
               <h2 className="marketing-section-title mt-3 font-display">What it does not do</h2>

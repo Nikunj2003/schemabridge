@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { ContentFrame } from "@/components/app/content-frame";
 import { ButtonLink } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
@@ -26,10 +27,13 @@ export function MigrationList() {
   }, []);
 
   return (
-    <div className="mx-auto max-w-[52rem] px-4 py-6 sm:px-8 sm:py-8">
+    <ContentFrame>
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="font-display text-[24px]">Your migrations</h1>
+          <Link href="/" className="inline-flex items-center gap-1 text-[13px] text-ink-muted hover:text-ink">
+            <span aria-hidden>←</span> Back to home
+          </Link>
+          <h1 className="mt-2 font-display text-[24px]">Your migrations</h1>
           <p className="mt-1.5 text-[14px] text-ink-muted">
             Pick up where you left off, or start a new one.
           </p>
@@ -88,7 +92,7 @@ export function MigrationList() {
       <p className="mt-8 text-[12.5px] text-ink-muted">
         Migrations are kept for 48 hours, then deleted.
       </p>
-    </div>
+    </ContentFrame>
   );
 }
 

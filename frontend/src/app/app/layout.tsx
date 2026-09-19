@@ -1,10 +1,10 @@
+import { MigrationUsageProvider } from "@/components/app/migration-usage";
 import { AppShell } from "@/components/app/shell";
-import { ACCOUNT, USAGE } from "@/lib/account";
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
-    <AppShell account={ACCOUNT} usage={USAGE}>
-      {children}
-    </AppShell>
+    <MigrationUsageProvider>
+      <AppShell>{children}</AppShell>
+    </MigrationUsageProvider>
   );
 }

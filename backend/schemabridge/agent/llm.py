@@ -26,6 +26,7 @@ from __future__ import annotations
 from typing import Any, Final
 
 from langchain_openai import ChatOpenAI
+from pydantic import SecretStr
 
 from schemabridge.server.config import get_settings
 
@@ -67,9 +68,13 @@ def build_model(*, max_tokens: int | None = None) -> ChatOpenAI:
     return ChatOpenAI(
         model=model_id,
         base_url=settings.nvidia_base_url,
-        api_key=settings.require_model_key(),
+        api_key=SecretStr(settings.require_model_key()),
         temperature=0,  # Mapping a column to a field is not a creative task.
-        max_tokens=max_tokens or default_max_tokens(model_id),
+        # This OpenAI-compatible endpoint expects the established `max_tokens`
+        # request field. Current LangChain types expose the newer
+        # `max_completion_tokens` constructor parameter instead, so keep the
+        # endpoint-specific field in the documented pass-through map.
+        model_kwargs={"max_tokens": max_tokens or default_max_tokens(model_id)},
         timeout=settings.model_timeout_seconds,
         # Without this the client retries transparently, turning one logical
         # request into three upstream calls and quietly outspending the budget.

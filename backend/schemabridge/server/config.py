@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     # --- Demo safety budgets ---------------------------------------------
     max_model_requests_per_run: int = Field(default=3, alias="AI_MAX_REQUESTS_PER_RUN")
     max_model_requests_per_day: int = Field(default=400, alias="AI_MAX_REQUESTS_PER_DAY")
+    #: Starts allowed for one anonymous browser session in an India calendar day.
+    max_migration_starts_per_session_per_day: int = Field(
+        default=10, alias="MIGRATION_MAX_RUNS_PER_DAY"
+    )
 
     # --- Runtime ---------------------------------------------------------
     # Kept below the platform's 300 s function ceiling so a step returns a

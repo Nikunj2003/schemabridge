@@ -31,12 +31,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """
     if get_settings().has_database:
         try:
-            from schemabridge.server import budget, receipts, runs, schemas
+            from schemabridge.server import budget, migration_quota, receipts, runs, schemas
 
             runs.ensure_indexes()
             receipts.ensure_indexes()
             budget.ensure_indexes()
             schemas.ensure_indexes()
+            migration_quota.ensure_indexes()
         except Exception:
             logger.warning("could not create indexes at startup", exc_info=False)
     yield

@@ -23,12 +23,15 @@ export function Decision({
   question,
   onSave,
   saving,
+  error,
   index,
   total,
 }: {
   question: PresentedQuestion;
   onSave: (decision: DecisionPayload) => void;
   saving: boolean;
+  /** A failed save belongs with the answer that needs to be retried. */
+  error?: string | null;
   index: number;
   total: number;
 }) {
@@ -170,6 +173,12 @@ export function Decision({
             </span>
           )}
         </div>
+
+        {error && (
+          <p role="alert" className="mt-4 rounded-md border border-problem/30 bg-problem-soft px-3.5 py-2.5 text-[13px] text-problem">
+            {error}
+          </p>
+        )}
       </div>
     </article>
   );

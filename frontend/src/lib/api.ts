@@ -110,6 +110,13 @@ export interface ActivityEvent {
   after: string | null;
 }
 
+export interface MigrationUsage {
+  used: number;
+  limit: number;
+  reset_at: string;
+  scope: "anonymous_browser_session";
+}
+
 export interface Counters {
   source_rows: number;
   records: number;
@@ -278,7 +285,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   schema: () => request<SchemaInfo>("/api/schema"),
 
+  /** Shared infrastructure model budget, not a visitor's migration allowance. */
   usage: () => request<{ used: number; limit: number }>("/api/usage"),
+
+  /** Migration starts available to this anonymous browser session today. */
+  migrationUsage: () => request<MigrationUsage>("/api/migration-usage"),
 
   /**
    * Start a migration.

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useId, useState } from "react";
 import { Wordmark } from "@/components/brand/logo";
+import { useMigrationUsage } from "@/components/app/migration-usage";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
 
@@ -26,17 +27,10 @@ const REFERENCE: NavItem[] = [
  * navigation mid-scroll — and with it the run's context and the way out — was
  * the single most disorienting thing about the previous build.
  */
-export function AppShell({
-  children,
-  account,
-  usage,
-}: {
-  children: React.ReactNode;
-  account: { name: string; email: string };
-  usage: { runsUsed: number; runsLimit: number };
-}) {
+export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
+  const { usage, error: usageError } = useMigrationUsage();
 
   return (
     // h-dvh with overflow-hidden: the page itself never scrolls, so the chrome
@@ -57,7 +51,7 @@ export function AppShell({
         </nav>
 
         <div className="shrink-0 border-t border-line p-2.5">
-          <AllowanceMeter used={usage.runsUsed} limit={usage.runsLimit} />
+          <AllowanceMeter usage={usage} error={usageError} />
         </div>
       </aside>
 
@@ -68,7 +62,7 @@ export function AppShell({
           </Link>
           <div className="flex-1" />
           <ThemeToggle />
-          <AccountMenu account={account} open={menuOpen} setOpen={setMenuOpen} />
+          <AccountMenu open={menuOpen} setOpen={setMenuOpen} />
         </header>
 
         {/* Phone navigation: the rail becomes a strip, still outside the scroll. */}
@@ -146,29 +140,43 @@ function NavLink({
   );
 }
 
-/** How much is left, and exactly when it comes back. */
-export function AllowanceMeter({ used, limit }: { used: number; limit: number }) {
-  const left = Math.max(0, limit - used);
-  const pct = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
+/** How much this anonymous browser session can still start today. */
+export function AllowanceMeter({
+  usage,
+  error,
+}: {
+  usage: import("@/lib/api").MigrationUsage | null;
+  error: string | null;
+}) {
+  if (error) {
+    return <p className="rounded-md bg-sunken px-3 py-2.5 text-[12px] text-ink-muted">Usage unavailable</p>;
+  }
+  if (!usage) {
+    return <div className="h-[76px] rounded-md bg-sunken" aria-busy="true"><span className="sr-only">Loading migration allowance…</span></div>;
+  }
+  const left = Math.max(0, usage.limit - usage.used);
+  const pct = usage.limit > 0 ? Math.min(100, (usage.used / usage.limit) * 100) : 0;
   return (
     <div className="rounded-md bg-sunken px-3 py-2.5">
-      <p className="text-[13px] font-medium tnum">
-        {left} of {limit} migrations left
-      </p>
+      <p className="text-[13px] font-medium tnum">{left} of {usage.limit} migrations left</p>
       <div className="mt-2 h-1 overflow-hidden rounded-full bg-line-strong">
         <div className="h-full rounded-full bg-accent transition-[width]" style={{ width: `${pct}%` }} />
       </div>
-      <p className="mt-1.5 text-[12px] text-ink-subtle">Resets at 12:00 AM IST</p>
+      <p className="mt-1.5 text-[12px] text-ink-subtle">Resets {resetAt(usage.reset_at)}</p>
     </div>
   );
 }
 
+function resetAt(iso: string): string {
+  const reset = new Date(iso);
+  if (Number.isNaN(reset.getTime())) return "at midnight IST";
+  return reset.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: true, timeZone: "Asia/Kolkata" }) + " IST";
+}
+
 function AccountMenu({
-  account,
   open,
   setOpen,
 }: {
-  account: { name: string; email: string };
   open: boolean;
   setOpen: (value: boolean) => void;
 }) {
@@ -181,10 +189,8 @@ function AccountMenu({
         onClick={() => setOpen(!open)}
         className="flex items-center gap-2 rounded-md py-1 pl-1 pr-1.5 text-[13.5px] hover:bg-sunken"
       >
-        <span className="flex size-7 items-center justify-center rounded-full bg-accent-soft text-[12px] font-semibold text-accent-ink">
-          {account.name.slice(0, 1)}
-        </span>
-        <span className="hidden max-w-[14ch] truncate sm:inline">{account.name}</span>
+        <span className="flex size-7 items-center justify-center rounded-full bg-accent-soft text-[12px] font-semibold text-accent-ink">A</span>
+        <span className="hidden max-w-[14ch] truncate sm:inline">Anonymous</span>
         <IconChevron />
       </button>
 
@@ -201,8 +207,8 @@ function AccountMenu({
             className="panel absolute right-0 top-full z-20 mt-1.5 w-56 p-1 shadow-pop"
           >
             <div className="px-2.5 py-2">
-              <p className="text-[13.5px] font-medium">{account.name}</p>
-              <p className="truncate text-[12.5px] text-ink-muted">{account.email}</p>
+              <p className="text-[13.5px] font-medium">Anonymous browser session</p>
+              <p className="text-[12.5px] text-ink-muted">Your migrations are available in this browser.</p>
             </div>
             <div className="my-1 h-px bg-line" />
             <Link href="/app/usage" className="block rounded px-2.5 py-1.5 text-[13.5px] hover:bg-sunken">
@@ -213,7 +219,7 @@ function AccountMenu({
             </Link>
             <div className="my-1 h-px bg-line" />
             <Link href="/" className="block rounded px-2.5 py-1.5 text-[13.5px] hover:bg-sunken">
-              Sign out
+              Back to home
             </Link>
           </div>
         </>

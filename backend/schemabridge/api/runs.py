@@ -46,6 +46,7 @@ from schemabridge.ingest.csv_source import parse_csv
 from schemabridge.ingest.limits import INGEST_LIMITS
 from schemabridge.ingest.profile import profile_columns
 from schemabridge.ingest.xlsx_source import parse_xlsx
+from schemabridge.server import migration_quota
 from schemabridge.server import runs as registry
 from schemabridge.server import schemas as schema_store
 from schemabridge.server.budget import usage_today
@@ -54,10 +55,6 @@ from schemabridge.server.sessions import ensure_session, read_session
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["migration"])
-
-#: Runs one visitor may start per day. Generous for a demo, bounded enough that
-#: the shared cluster and inference allowance survive an enthusiastic visitor.
-_MAX_RUNS_PER_SESSION = 25
 
 #: Employee ids the demo fixtures use to exercise delivery failures. Held here
 #: rather than in the delivery path so production logic has no test branches.
@@ -171,6 +168,26 @@ def read_usage() -> dict[str, int]:
     return {"used": used, "limit": limit}
 
 
+@router.get("/migration-usage")
+def read_migration_usage(request: Request, response: Response) -> dict[str, str | int]:
+    """Authoritative daily starts remaining for this anonymous browser session."""
+    session_id = ensure_session(request, response)
+    try:
+        usage = migration_quota.usage_for_session(session_id)
+    except Exception as error:
+        logger.warning("migration quota unavailable: %s", type(error).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Migration allowance is unavailable.",
+        ) from None
+    return {
+        "used": usage.used,
+        "limit": usage.limit,
+        "reset_at": usage.reset_at.isoformat(),
+        "scope": "anonymous_browser_session",
+    }
+
+
 @router.post("/runs", status_code=status.HTTP_201_CREATED)
 async def create_run(
     request: Request,
@@ -198,21 +215,6 @@ async def create_run(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"At most {INGEST_LIMITS.max_files} files per migration.",
         )
-
-    try:
-        if registry.count_runs_for_session(session_id) >= _MAX_RUNS_PER_SESSION:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="You have started a lot of migrations today. Try again tomorrow.",
-            )
-    except HTTPException:
-        raise
-    except Exception as error:
-        logger.warning("run registry unavailable: %s", type(error).__name__)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="The database is unavailable, so a migration cannot be started.",
-        ) from None
 
     sources: list[SourceFile] = []
     columns: list[SourceColumn] = []
@@ -272,7 +274,31 @@ async def create_run(
     schema = _resolve_schema(schema_id, session_id, columns, profiles, schema_spec)
 
     run_id = registry.new_run_id()
-    registry.create_run(run_id, session_id, tuple(names), len(rows))
+    try:
+        migration_quota.reserve_migration_start(session_id, run_id)
+    except migration_quota.MigrationQuotaExhaustedError as error:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(error)
+        ) from None
+    except Exception as error:
+        logger.warning("migration quota unavailable: %s", type(error).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Migration allowance is unavailable, so a migration cannot be started.",
+        ) from None
+
+    try:
+        registry.create_run(run_id, session_id, tuple(names), len(rows))
+    except Exception as error:
+        try:
+            migration_quota.release_migration_start(session_id, run_id)
+        except Exception:
+            logger.warning("migration quota release failed after registry error")
+        logger.warning("run registry unavailable: %s", type(error).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The database is unavailable, so a migration cannot be started.",
+        ) from None
 
     initial: dict[str, Any] = {
         "run_id": run_id,

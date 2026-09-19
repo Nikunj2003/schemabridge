@@ -14,7 +14,10 @@ export type Activity = "idle" | "working" | "waiting" | "finished" | "error";
 
 export function useRun(runId: string) {
   const [run, setRun] = useState<Run | null>(null);
+  // A run failure belongs to the page; a failed review save belongs to the
+  // review dialog, where the person can correct and retry it.
   const [error, setError] = useState<string | null>(null);
+  const [decisionError, setDecisionError] = useState<string | null>(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -94,11 +97,12 @@ export function useRun(runId: string) {
   const decide = useCallback(
     async (issueId: string, decision: Decision) => {
       setSaving(true);
+      setDecisionError(null);
       try {
         absorb(await api.resolve(runId, { [issueId]: decision }));
         return true;
       } catch (caught) {
-        setError(caught instanceof Error ? caught.message : "That decision could not be saved.");
+        setDecisionError(caught instanceof Error ? caught.message : "That decision could not be saved.");
         return false;
       } finally {
         setSaving(false);
@@ -119,5 +123,5 @@ export function useRun(runId: string) {
             ? "working"
             : "idle";
 
-  return { run, error, refreshError, saving, decide, activity };
+  return { run, error, decisionError, refreshError, saving, decide, activity };
 }

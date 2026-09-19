@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+import { ContentFrame } from "@/components/app/content-frame";
+import { useMigrationUsage } from "@/components/app/migration-usage";
 import { Button } from "@/components/ui/button";
 import { Select, Textarea } from "@/components/ui/field";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -33,6 +35,7 @@ const SAVED = "saved";
  */
 export function NewMigration() {
   const router = useRouter();
+  const { refresh: refreshMigrationUsage } = useMigrationUsage();
   const [files, setFiles] = useState<File[]>([]);
   const [dragging, setDragging] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -101,6 +104,7 @@ export function NewMigration() {
         choice === SPEC ? undefined : (choice === SAVED ? saved : (choice ?? undefined)),
         choice === SPEC ? spec : undefined,
       );
+      await refreshMigrationUsage();
       router.push(`/app/migrations/${run.run_id}`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "The migration could not be started.");
@@ -123,7 +127,7 @@ export function NewMigration() {
           : null;
 
   return (
-    <div className="mx-auto max-w-[52rem] px-4 py-6 sm:px-8 sm:py-8">
+    <ContentFrame>
       <h1 className="font-display text-[24px]">New migration</h1>
       <p className="mt-1.5 max-w-[62ch] text-[14px] text-ink-muted">
         Add your exports and say what the destination expects. The agent works out
@@ -348,7 +352,7 @@ export function NewMigration() {
           would change what gets migrated.
         </p>
       </div>
-    </div>
+    </ContentFrame>
   );
 }
 

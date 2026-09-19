@@ -16,17 +16,25 @@ The failure behaviour is driven by an explicit header the engine never sends on
 its own, rather than by magic employee ids, so production logic contains no
 special cases for test data.
 
-Which contract to enforce arrives in a header. That is safe *here* and nowhere
-else in this codebase: the endpoint already requires a server-side shared secret,
-so the header cannot come from a browser. It is looked up server-side and falls
-back to the built-in template, so an unknown id is refused by a real contract
-rather than waved through.
+Which contract to enforce arrives in a header, as the schema itself rather than
+an id to look up: a run's schema may never have been saved — detected from the
+upload, or supplied inline for one migration — so there would be nothing to look
+up. That is safe *here* and nowhere else in this codebase, because the endpoint
+already requires a server-side shared secret and so the header cannot come from a
+browser.
+
+An unreadable header falls back to the built-in template rather than skipping
+validation. A destination that accepts anything when it cannot identify the
+contract is worse than one applying the wrong contract, because the caller never
+learns something was wrong.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import logging
 import secrets
 from typing import Annotated, Any
 
@@ -34,9 +42,8 @@ from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from schemabridge.domain.schema import TargetSchema
-from schemabridge.domain.target import BUILTIN_SCHEMA, BUILTIN_SCHEMA_ID
+from schemabridge.domain.target import BUILTIN_SCHEMA
 from schemabridge.domain.validate import validate_record
-from schemabridge.server import schemas as schema_store
 from schemabridge.server.config import get_settings
 from schemabridge.server.receipts import (
     PayloadConflictError,
@@ -44,6 +51,8 @@ from schemabridge.server.receipts import (
     store_receipt,
 )
 from schemabridge.server.target_client import SCHEMA_HEADER
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/mock/destination", tags=["mock destination"])
 
@@ -56,22 +65,22 @@ _REJECT_HEADER = "x-demo-reject"
 _failed_once: set[str] = set()
 
 
-def _contract(schema_id: str | None) -> TargetSchema:
+def _contract(encoded: str | None) -> TargetSchema:
     """The schema this request should be validated against.
 
-    Unknown or absent falls back to the built-in template rather than skipping
-    validation: a destination that accepts anything when it cannot identify the
-    contract is worse than one that applies the wrong one, because the caller
-    never learns something was wrong.
+    Absent or unreadable falls back to the built-in template — see the module
+    docstring for why that is the right failure.
     """
-    if not schema_id or schema_id == BUILTIN_SCHEMA_ID:
+    if not encoded:
         return BUILTIN_SCHEMA
     try:
-        stored = schema_store.find_schema_unowned(schema_id)
+        document = json.loads(base64.b64decode(encoded))
+        return TargetSchema.model_validate(
+            {"schema_id": "delivered", "name": document["name"], "fields": document["fields"]}
+        )
     except Exception:
-        # A database problem must not turn into an accepted record.
+        logger.warning("could not read the target schema header; using the built-in contract")
         return BUILTIN_SCHEMA
-    return stored or BUILTIN_SCHEMA
 
 
 def _require_secret(provided: str | None) -> None:

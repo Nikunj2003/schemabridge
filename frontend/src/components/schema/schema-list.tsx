@@ -64,7 +64,8 @@ export function SchemaList() {
           <h1 className="font-display text-[24px]">My schemas</h1>
           <p className="mt-1.5 max-w-[60ch] text-[14px] text-ink-muted">
             A schema is what the destination expects. Each migration maps onto one,
-            so a different client can have a different shape.
+            so a different client can have a different shape. Upload one as a JSON
+            or YAML spec, or build it field by field.
           </p>
         </div>
         <ButtonLink href="/app/schema/new" variant="primary">
@@ -106,7 +107,7 @@ export function SchemaList() {
                     Copy the built-in one
                   </ButtonLink>
                   <ButtonLink href="/app/schema/new" size="sm" variant="quiet">
-                    Start from scratch
+                    Upload a spec or build one
                   </ButtonLink>
                 </div>
               </div>
@@ -175,6 +176,14 @@ function SchemaCard({
           </div>
 
           <div className="flex shrink-0 flex-wrap gap-2">
+            <a
+              href={api.schemas.specUrl(schema.schema_id)}
+              download
+              className="inline-flex h-8 shrink-0 items-center rounded-md px-2.5 text-[13px] font-medium text-ink-muted hover:bg-sunken hover:text-ink"
+              title="Download as a YAML spec"
+            >
+              Export
+            </a>
             {schema.builtin ? (
               <ButtonLink href={`/app/schema/new?from=${schema.schema_id}`} size="sm">
                 Copy and edit

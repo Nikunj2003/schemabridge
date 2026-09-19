@@ -117,19 +117,6 @@ def find_schema(schema_id: str, owner_session_id: str) -> SchemaRecord | None:
     return None if document is None else _record(document)
 
 
-def find_schema_unowned(schema_id: str) -> TargetSchema | None:
-    """A schema by id, without an ownership check.
-
-    Exists for the destination stub, which validates a delivery against the
-    contract the run names and has no session to check against — it is
-    authenticated by a server-side shared secret instead. Never reachable from a
-    browser, and never used by a route a visitor can call: every visitor-facing
-    read goes through `find_schema`, which is scoped to the owner.
-    """
-    document = _schemas().find_one({"_id": schema_id})
-    return None if document is None else _record(document).schema
-
-
 def list_schemas(owner_session_id: str, limit: int = MAX_PER_SESSION) -> list[SchemaRecord]:
     """A visitor's saved schemas, most recently changed first."""
     cursor = (

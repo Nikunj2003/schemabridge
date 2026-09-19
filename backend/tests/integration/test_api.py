@@ -41,10 +41,23 @@ def origin() -> Iterator[str]:
     The engine delivers to its own stub over HTTP, so an in-process test client
     is not enough: nothing would be listening on the origin it resolves. Running
     a real server means these tests exercise the same path production does.
+
+    `PORT` is set to the port actually bound, because `_resolve_origin` only
+    trusts a loopback origin whose port matches the one this service believes it
+    is listening on — a deliberate guard against a request-forgery via a
+    client-supplied origin. Without setting it, delivery resolves to the default
+    8000 and these tests pass or fail depending on whether something unrelated
+    happens to be listening there.
     """
-    from main import app
+    from schemabridge.server.config import get_settings
 
     port = _free_port()
+    os.environ["PORT"] = str(port)
+    # The accessor is cached, so the new value has to invalidate it.
+    get_settings.cache_clear()
+
+    from main import app
+
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
@@ -60,6 +73,8 @@ def origin() -> Iterator[str]:
 
     server.should_exit = True
     thread.join(timeout=10)
+    os.environ.pop("PORT", None)
+    get_settings.cache_clear()
 
 
 @pytest.fixture
@@ -602,3 +617,191 @@ class TestRunsUseTheChosenSchema:
         run = client.get(f"/api/runs/{run_id}").json()
         assert run["schema_name"] == "Order"
         drive(client, run)
+
+
+class TestSpecImportAndExport:
+    """A spec is a first-class way in, so both routes are exercised over HTTP.
+
+    Worth testing at this level rather than only as a parser: the file and text
+    routes are separate handlers because one request cannot carry both a multipart
+    file and a JSON body, and a single handler declaring both leaves the second
+    silently unbound — which is exactly the bug these caught.
+    """
+
+    JSON_SPEC = (
+        '{"title": "Customer", "required": ["customerId", "primaryEmail"], "properties": '
+        '{"customerId": {"type": "string"}, "primaryEmail": {"type": "string", '
+        '"format": "email"}, "signedUp": {"type": "string", "format": "date"}}}'
+    )
+
+    YAML_SPEC = (
+        "name: Vendor\n"
+        "fields:\n"
+        "  - name: vendorRef\n"
+        "    kind: identifier\n"
+        "    required: true\n"
+        "    is_identity: true\n"
+        "  - name: onboarded\n"
+        "    kind: date\n"
+    )
+
+    def test_a_json_schema_file_is_read(self, client: httpx.Client) -> None:
+        response = client.post(
+            "/api/schemas/import",
+            files={"file": ("customer.schema.json", self.JSON_SPEC, "application/json")},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["name"] == "Customer"
+        assert [f["name"] for f in body["fields"]] == [
+            "customerId",
+            "primaryEmail",
+            "signedUp",
+        ]
+        # A bare "string" takes its kind from the name, or a real contract would
+        # import as free text throughout.
+        kinds = {f["name"]: f["kind"] for f in body["fields"]}
+        assert kinds == {
+            "customerId": "identifier",
+            "primaryEmail": "email",
+            "signedUp": "date",
+        }
+
+    def test_a_yaml_file_is_read(self, client: httpx.Client) -> None:
+        response = client.post(
+            "/api/schemas/import",
+            files={"file": ("vendor.yaml", self.YAML_SPEC, "application/yaml")},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["name"] == "Vendor"
+        assert [f["name"] for f in body["fields"] if f["is_identity"]] == ["vendorRef"]
+
+    def test_pasted_text_is_read(self, client: httpx.Client) -> None:
+        response = client.post("/api/schemas/import/text", json={"text": self.YAML_SPEC})
+        assert response.status_code == 200, response.text
+        assert response.json()["name"] == "Vendor"
+
+    def test_what_was_guessed_is_reported(self, client: httpx.Client) -> None:
+        """JSON Schema cannot name the identity field, so the guess is stated."""
+        body = client.post(
+            "/api/schemas/import",
+            files={"file": ("c.json", self.JSON_SPEC, "application/json")},
+        ).json()
+        assert any("identifies a record" in note for note in body["assumptions"])
+
+    def test_importing_does_not_save(self, client: httpx.Client) -> None:
+        """A guess must not become a saved contract without being reviewed."""
+        before = len(client.get("/api/schemas").json()["schemas"])
+        client.post(
+            "/api/schemas/import",
+            files={"file": ("c.json", self.JSON_SPEC, "application/json")},
+        )
+        assert len(client.get("/api/schemas").json()["schemas"]) == before
+
+    def test_an_unreadable_spec_explains_itself(self, client: httpx.Client) -> None:
+        response = client.post("/api/schemas/import/text", json={"text": "{not: [valid"})
+        assert response.status_code == 400
+        assert "JSON or YAML" in response.json()["detail"]
+
+    def test_a_yaml_bomb_is_not_executed(self, client: httpx.Client) -> None:
+        """A spec arrives in a request body, so `yaml.load` would be RCE."""
+        response = client.post(
+            "/api/schemas/import/text",
+            json={"text": "!!python/object/apply:os.system ['echo pwned']"},
+        )
+        assert response.status_code == 400
+
+    def test_the_builtin_exports_as_yaml(self, client: httpx.Client) -> None:
+        response = client.get("/api/schemas/builtin:employee/spec")
+        assert response.status_code == 200
+        assert "attachment" in response.headers["content-disposition"]
+        assert "employeeId" in response.text
+
+    def test_export_then_import_round_trips(self, client: httpx.Client) -> None:
+        """Over HTTP, not just in the parser: the whole path has to preserve it."""
+        exported = client.get("/api/schemas/builtin:employee/spec").text
+        restored = client.post("/api/schemas/import/text", json={"text": exported}).json()
+
+        assert restored["name"] == "Employee"
+        assert [f["name"] for f in restored["fields"]] == [
+            "employeeId",
+            "fullName",
+            "workEmail",
+            "startDate",
+            "endDate",
+            "department",
+            "employmentType",
+        ]
+        assert [f["name"] for f in restored["fields"] if f["is_identity"]] == ["employeeId"]
+        # The curated aliases survive, so the same real headers still match.
+        start = next(f for f in restored["fields"] if f["name"] == "startDate")
+        assert "doj" in start["spellings"]
+
+    def test_another_visitor_cannot_export_your_schema(
+        self, origin: str, client: httpx.Client
+    ) -> None:
+        schema_id = client.post("/api/schemas", json=ORDER_SCHEMA).json()["schema_id"]
+        try:
+            with httpx.Client(base_url=origin, timeout=30) as stranger:
+                assert stranger.get(f"/api/schemas/{schema_id}/spec").status_code in {401, 404}
+        finally:
+            client.delete(f"/api/schemas/{schema_id}")
+
+
+class TestRunFromASpec:
+    def test_a_spec_supplied_inline_becomes_the_runs_contract(self, client: httpx.Client) -> None:
+        """End to end on a shape with nothing to do with employment.
+
+        The destination has to enforce this contract too. It previously received a
+        schema *id* to look up, and an inline spec is never saved — so every such
+        delivery was silently validated against the built-in employee contract and
+        refused.
+        """
+        spec = (
+            "name: Customer\n"
+            "fields:\n"
+            "  - name: employeeId\n"
+            "    label: Customer ID\n"
+            "    kind: identifier\n"
+            "    required: true\n"
+            "    is_identity: true\n"
+            "  - name: fullName\n"
+            "    kind: person_name\n"
+            "    required: true\n"
+            "  - name: workEmail\n"
+            "    kind: email\n"
+            "    required: true\n"
+            "  - name: startDate\n"
+            "    kind: date\n"
+            "    required: true\n"
+        )
+        files = [
+            (
+                "files",
+                (
+                    "employees-clean.csv",
+                    (SAMPLES / "employees-clean.csv").read_bytes(),
+                    "text/csv",
+                ),
+            )
+        ]
+        created = client.post("/api/runs", files=files, data={"schema_spec": spec})
+        assert created.status_code == 201, created.text
+        assert created.json()["schema_name"] == "Customer"
+
+        final = drive(client, created.json())
+        assert final["phase"] == "complete", final["records"]
+        assert final["counters"]["delivered"] == 3
+        assert final["counters"]["failed"] == 0
+
+    def test_an_unreadable_inline_spec_refuses_the_run(self, client: httpx.Client) -> None:
+        """Not started rather than quietly falling back to a different contract."""
+        files = [
+            (
+                "files",
+                ("employees-clean.csv", (SAMPLES / "employees-clean.csv").read_bytes(), "text/csv"),
+            )
+        ]
+        response = client.post("/api/runs", files=files, data={"schema_spec": "{broken"})
+        assert response.status_code == 400

@@ -21,6 +21,9 @@ dependencies = [
   "pandas==3.0.6",
   "openpyxl==3.1.5",
   "jsonschema==4.26.0",
+  # Reading a target schema handed over as a YAML spec. Present transitively via
+  # langchain, but declared because the domain layer imports it directly.
+  "pyyaml==6.0.3",
   # Outbound delivery to the destination API.
   "httpx==0.28.1",
   # Transitively required by requests (via langchain); declared explicitly so
@@ -34,6 +37,7 @@ dev = [
   "pytest-asyncio==1.4.0",
   "ruff==0.16.8",
   "mypy==2.3.1",
+  "types-PyYAML==6.0.12.20250915",
   "uvicorn==0.53.0",
   "python-dotenv==1.2.3",
   "pandas-stubs==3.0.5.260914",

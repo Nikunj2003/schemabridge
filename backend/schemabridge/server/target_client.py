@@ -18,6 +18,7 @@ integration target offers.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
@@ -47,9 +48,44 @@ MAX_ATTEMPTS = 3
 #: wrong, so repeating it unchanged cannot help.
 _RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 
-#: Names the contract the destination validates against, so a run using a custom
-#: schema is not checked against the built-in one.
+#: Carries the contract the destination validates against.
+#:
+#: The *schema itself*, not an id to look up. A run's schema may never have been
+#: saved — detected from the upload, or supplied inline as a spec for one
+#: migration — so there is nothing to look up, and an id-based destination
+#: silently validated those against the built-in template instead.
+#:
+#: Safe here and nowhere else in this codebase: the endpoint already requires a
+#: server-side shared secret, so this cannot come from a browser. It is
+#: deliberately unlike `request_origin`, which is never taken from a header
+#: because a forged one would turn delivery into request forgery.
 SCHEMA_HEADER = "X-Target-Schema"
+
+
+def _encode_schema(schema: TargetSchema) -> str:
+    """The contract as a header value.
+
+    Base64 of compact JSON, because a header must be single-line Latin-1 and a
+    schema's labels and descriptions are neither. Only the parts validation
+    needs, which keeps the header well inside what any proxy will carry.
+    """
+    contract = {
+        "name": schema.name,
+        "fields": [
+            {
+                "name": field.name,
+                "label": field.label,
+                "kind": field.kind.value,
+                "required": field.required,
+                **({"enum_values": list(field.enum_values)} if field.enum_values else {}),
+                **({"not_before": field.not_before} if field.not_before else {}),
+                **({"max_length": field.max_length} if field.max_length else {}),
+            }
+            for field in schema.fields
+        ],
+    }
+    compact = json.dumps(contract, separators=(",", ":"))
+    return base64.b64encode(compact.encode("utf-8")).decode("ascii")
 
 
 def build_payload(record: CanonicalRecord, *, schema: TargetSchema) -> dict[str, Any]:
@@ -171,10 +207,9 @@ def deliver_record(
         "Authorization": f"Bearer {settings.target_api_secret}",
         "Idempotency-Key": key,
         "Content-Type": "application/json",
-        # Which contract the destination should enforce. Safe as a header only
-        # because this endpoint is authenticated with a server-side shared secret
-        # — unlike the delivery origin, which is never taken from a header.
-        SCHEMA_HEADER: schema.schema_id,
+        # The contract itself, compactly: a run's schema may never have been
+        # saved, so there would be nothing for the destination to look up.
+        SCHEMA_HEADER: _encode_schema(schema),
     }
     if demo_headers:
         headers.update(demo_headers)

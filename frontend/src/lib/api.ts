@@ -189,6 +189,15 @@ export interface SchemaInfo extends TargetSchema {
   limits: Record<string, number>;
 }
 
+/** A schema read from a spec, plus what the import had to infer. */
+export interface ImportedSchema extends TargetSchema {
+  /**
+   * Things guessed rather than stated — JSON Schema cannot say which field
+   * identifies a record. Shown to the user instead of being folded in silently.
+   */
+  assumptions: string[];
+}
+
 export interface SchemaListing {
   builtin: TargetSchema;
   schemas: TargetSchema[];
@@ -273,11 +282,13 @@ export const api = {
    *
    * `schemaId` picks the contract: a saved schema's id, "detected" to derive one
    * from the uploaded headers, or omitted for the built-in template.
+   * `schemaSpec` supplies a JSON or YAML spec inline, used for this run only.
    */
-  createRun: (files: File[], schemaId?: string) => {
+  createRun: (files: File[], schemaId?: string, schemaSpec?: string) => {
     const body = new FormData();
     for (const file of files) body.append("files", file);
     if (schemaId) body.append("schema_id", schemaId);
+    if (schemaSpec) body.append("schema_spec", schemaSpec);
     return request<Run>("/api/runs", { method: "POST", body });
   },
 
@@ -300,6 +311,28 @@ export const api = {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(schema),
       }),
+
+    /**
+     * Read a JSON or YAML spec into a schema without saving it.
+     *
+     * Not saved on purpose: the import may have had to guess an identity field,
+     * so the result opens in the builder for review first.
+     */
+    importFile: (file: File) => {
+      const body = new FormData();
+      body.append("file", file);
+      return request<ImportedSchema>("/api/schemas/import", { method: "POST", body });
+    },
+
+    importText: (text: string, name?: string) =>
+      request<ImportedSchema>("/api/schemas/import/text", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, name: name ?? null }),
+      }),
+
+    /** Where to download a schema as a YAML spec. */
+    specUrl: (schemaId: string) => `/api/schemas/${schemaId}/spec`,
 
     remove: async (schemaId: string) => {
       const response = await fetch(`/api/schemas/${schemaId}`, {

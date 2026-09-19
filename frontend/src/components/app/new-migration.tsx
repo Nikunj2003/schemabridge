@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/field";
 import { api, type SchemaListing, type TargetSchema } from "@/lib/api";
 import { fileSize } from "@/lib/present";
 import { cn } from "@/lib/utils";
@@ -13,6 +14,9 @@ const MAX_FILES = 4;
 
 /** The special choice: derive a contract from the uploaded headers. */
 const DETECT = "detected";
+
+/** The special choice: a spec supplied for this run only, not saved. */
+const SPEC = "spec";
 
 /**
  * Starting a migration.
@@ -32,6 +36,7 @@ export function NewMigration() {
   const [starting, setStarting] = useState(false);
   const [listing, setListing] = useState<SchemaListing | null>(null);
   const [choice, setChoice] = useState<string | null>(null);
+  const [spec, setSpec] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -83,7 +88,11 @@ export function NewMigration() {
     setStarting(true);
     setError(null);
     try {
-      const run = await api.createRun(files, choice ?? undefined);
+      const run = await api.createRun(
+        files,
+        choice === SPEC ? undefined : (choice ?? undefined),
+        choice === SPEC ? spec : undefined,
+      );
       router.push(`/app/migrations/${run.run_id}`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "The migration could not be started.");
@@ -212,6 +221,23 @@ export function NewMigration() {
             ))}
 
             <SchemaOption
+              id={SPEC}
+              chosen={choice}
+              onChoose={setChoice}
+              title="Paste a spec"
+              detail="A JSON Schema or YAML field list, used for this run only. Save it from My schemas if you want to keep it."
+            >
+              <Textarea
+                aria-label="Schema spec for this run"
+                rows={6}
+                className="mt-2.5 [&_textarea]:raw"
+                value={spec}
+                onChange={(event) => setSpec(event.target.value)}
+                placeholder={"name: Customer\nfields:\n  - name: customerId\n    kind: identifier\n    required: true\n    is_identity: true"}
+              />
+            </SchemaOption>
+
+            <SchemaOption
               id={DETECT}
               chosen={choice}
               onChoose={setChoice}
@@ -266,7 +292,7 @@ export function NewMigration() {
         <Button
           variant="primary"
           size="lg"
-          disabled={files.length === 0 || starting}
+          disabled={files.length === 0 || starting || (choice === SPEC && !spec.trim())}
           onClick={() => void start()}
         >
           {starting ? "Starting…" : "Start migration"}
@@ -288,6 +314,7 @@ function SchemaOption({
   title,
   note,
   detail,
+  children,
 }: {
   id: string;
   chosen: string | null;
@@ -295,32 +322,35 @@ function SchemaOption({
   title: string;
   note?: string;
   detail: string;
+  /** Revealed only when chosen, so an unselected option stays one line. */
+  children?: React.ReactNode;
 }) {
   const selected = chosen === id;
   return (
-    <label
+    <div
       className={cn(
-        "flex cursor-pointer gap-3 rounded-md border px-4 py-3 transition-colors",
-        selected
-          ? "border-accent bg-accent-soft"
-          : "border-line bg-surface hover:border-line-strong",
+        "rounded-md border transition-colors",
+        selected ? "border-accent bg-accent-soft" : "border-line bg-surface hover:border-line-strong",
       )}
     >
-      <input
-        type="radio"
-        name="schema"
-        value={id}
-        checked={selected}
-        onChange={() => onChoose(id)}
-        className="mt-1 size-4 shrink-0 accent-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
-      />
-      <span className="min-w-0">
-        <span className="flex flex-wrap items-center gap-2">
-          <span className="text-[13.5px] font-medium">{title}</span>
-          {note && <span className="text-[11.5px] text-ink-subtle">{note}</span>}
+      <label className="flex cursor-pointer gap-3 px-4 py-3">
+        <input
+          type="radio"
+          name="schema"
+          value={id}
+          checked={selected}
+          onChange={() => onChoose(id)}
+          className="mt-1 size-4 shrink-0 accent-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
+        />
+        <span className="min-w-0">
+          <span className="flex flex-wrap items-center gap-2">
+            <span className="text-[13.5px] font-medium">{title}</span>
+            {note && <span className="text-[11.5px] text-ink-subtle">{note}</span>}
+          </span>
+          <span className="mt-0.5 block text-[12.5px] text-ink-muted">{detail}</span>
         </span>
-        <span className="mt-0.5 block text-[12.5px] text-ink-muted">{detail}</span>
-      </span>
-    </label>
+      </label>
+      {selected && children && <div className="px-4 pb-3.5">{children}</div>}
+    </div>
   );
 }

@@ -39,6 +39,7 @@ from schemabridge.domain.models import (
     SourceRow,
 )
 from schemabridge.domain.schema import TargetSchema
+from schemabridge.domain.spec import SpecError, parse_spec
 from schemabridge.domain.target import BUILTIN_SCHEMA
 from schemabridge.graph import runner
 from schemabridge.ingest.csv_source import parse_csv
@@ -122,13 +123,25 @@ def _resolve_schema(
     session_id: str,
     columns: list[SourceColumn],
     profiles: list[ColumnProfile],
+    schema_spec: str | None = None,
 ) -> TargetSchema:
     """Which contract this run maps onto.
 
-    Three ways in, matching the three ways a consultant actually arrives: a
-    contract they have saved, no contract at all (detect one from the file), or
-    the shipped template as a sensible default.
+    Four ways in, matching the ways a consultant actually arrives: a spec file
+    they already have, a contract they saved here, no contract at all (detect one
+    from the file), or the shipped template as a default.
+
+    A spec supplied inline is used for this run only and not saved — the migration
+    is the thing being asked for, and a schema saved as a side effect of running
+    one is clutter nobody asked for. It can be saved separately from the builder.
     """
+    if schema_spec and schema_spec.strip():
+        try:
+            return parse_spec(schema_spec).schema
+        except SpecError as problem:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(problem)
+            ) from None
     if not schema_id or schema_id == BUILTIN_SCHEMA.schema_id:
         return BUILTIN_SCHEMA
     if schema_id == "detected":
@@ -164,11 +177,14 @@ async def create_run(
     response: Response,
     files: Annotated[list[UploadFile], File()],
     schema_id: Annotated[str | None, Form()] = None,
+    schema_spec: Annotated[str | None, Form()] = None,
 ) -> RunView:
     """Ingest source files and start a migration.
 
     `schema_id` picks the contract: a saved schema's id, "detected" to derive one
     from the uploaded headers, or omitted for the built-in template.
+    `schema_spec` supplies a JSON or YAML spec inline for this run only, and takes
+    precedence when both are given.
     """
     _same_origin(request)
     session_id = ensure_session(request, response)
@@ -253,7 +269,7 @@ async def create_run(
             detail=f"{len(rows)} rows exceeds the limit of {INGEST_LIMITS.max_total_rows}.",
         )
 
-    schema = _resolve_schema(schema_id, session_id, columns, profiles)
+    schema = _resolve_schema(schema_id, session_id, columns, profiles, schema_spec)
 
     run_id = registry.new_run_id()
     registry.create_run(run_id, session_id, tuple(names), len(rows))

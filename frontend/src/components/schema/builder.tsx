@@ -25,12 +25,19 @@ export function SchemaBuilder({
   source,
   schemaId,
   maxFields,
+  assumptions = [],
 }: {
   /** The schema to start from: one being edited, or a template being copied. */
   source: TargetSchema | null;
   /** Set when editing a saved schema. Null when creating one. */
   schemaId: string | null;
   maxFields: number;
+  /**
+   * What an import had to infer rather than read. Shown so a guess is visible as
+   * a guess — a spec cannot say which field identifies a record, and getting that
+   * wrong merges or splits records.
+   */
+  assumptions?: string[];
 }) {
   const router = useRouter();
   const [name, setName] = useState(
@@ -110,6 +117,21 @@ export function SchemaBuilder({
         Describe what the destination expects. The agent matches your columns onto
         these fields, whatever your export calls them.
       </p>
+
+      {assumptions.length > 0 && (
+        <div className="mt-5 rounded-md border border-attention/30 bg-attention-soft px-4 py-3">
+          <p className="text-[13px] font-medium text-attention">
+            Read from your spec, with some things filled in
+          </p>
+          <ul className="mt-1.5 space-y-1">
+            {assumptions.map((note) => (
+              <li key={note} className="text-[12.5px] text-attention">
+                {note}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <section className="panel mt-6 px-4 py-4 sm:px-5">
         <Input
@@ -214,6 +236,18 @@ export function SchemaBuilder({
         <Button size="lg" variant="quiet" onClick={() => router.back()}>
           Cancel
         </Button>
+        {schemaId && (
+          // A saved schema can be handed to version control or another
+          // engagement. Only once saved: exporting a half-typed draft would
+          // produce a spec that does not describe anything.
+          <a
+            href={api.schemas.specUrl(schemaId)}
+            download
+            className="ml-auto text-[13px] text-accent-ink underline"
+          >
+            Download as YAML
+          </a>
+        )}
       </div>
     </div>
   );

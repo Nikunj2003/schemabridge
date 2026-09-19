@@ -14,13 +14,15 @@ is no second validation layer here to disagree with the first.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile, status
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, ValidationError
 
 from schemabridge.api.views import target_schema_view
 from schemabridge.domain.schema import MAX_FIELDS, TargetFieldSpec, TargetSchema, ValueKind
+from schemabridge.domain.spec import MAX_SPEC_BYTES, SpecError, parse_spec, to_yaml
 from schemabridge.domain.target import BUILTIN_SCHEMA
 from schemabridge.server import schemas as store
 from schemabridge.server.sessions import ensure_session, read_session
@@ -48,6 +50,13 @@ class FieldInput(BaseModel):
     enum_values: list[str] = []
     value_aliases: dict[str, str] = {}
     not_before: str | None = None
+
+
+class SpecInput(BaseModel):
+    """A spec pasted rather than uploaded as a file."""
+
+    text: str
+    name: str | None = None
 
 
 class SchemaInput(BaseModel):
@@ -142,6 +151,96 @@ def list_schemas(request: Request) -> dict[str, Any]:
         ],
         "limits": {"max_fields": MAX_FIELDS, "max_schemas": store.MAX_PER_SESSION},
     }
+
+
+def _read(text: str, fallback: str) -> dict[str, Any]:
+    """Parse a spec into the builder's starting point.
+
+    Deliberately does not save. The import may have had to guess which field
+    identifies a record — JSON Schema cannot express that — so the result opens in
+    the builder for review. Saving silently would make a guess into the contract a
+    migration ran against without anybody seeing it.
+    """
+    try:
+        imported = parse_spec(text, fallback_name=fallback)
+    except SpecError as problem:
+        # The parser's message is written for a person and names the line.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(problem)) from None
+    return {
+        **target_schema_view(imported.schema),
+        # Surfaced rather than folded in, so the builder can show what it inferred
+        # instead of presenting a guess as though the file had said it.
+        "assumptions": list(imported.assumptions),
+    }
+
+
+# Two routes rather than one taking either: a single handler cannot accept both a
+# multipart file and a JSON body, because the content type decides how the whole
+# request is parsed. Trying to do both leaves whichever is declared second unbound.
+@router.post("/import")
+async def import_spec_file(
+    request: Request,
+    file: Annotated[UploadFile, File()],
+) -> dict[str, Any]:
+    """Read an uploaded JSON or YAML spec file."""
+    raw = await file.read()
+    if len(raw) > MAX_SPEC_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"That spec is larger than {MAX_SPEC_BYTES // 1024}KB.",
+        )
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="That file is not valid UTF-8 text.",
+        ) from None
+    return _read(text, (file.filename or "Imported schema").rsplit(".", 1)[0])
+
+
+@router.post("/import/text")
+def import_spec_text(request: Request, pasted: SpecInput) -> dict[str, Any]:
+    """Read a spec pasted as text."""
+    if not pasted.text.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Paste the spec's contents."
+        )
+    return _read(pasted.text, pasted.name or "Imported schema")
+
+
+@router.get("/{schema_id}/spec", response_class=PlainTextResponse)
+def export_spec(schema_id: str, request: Request) -> Response:
+    """A schema as a YAML spec, for version control or another engagement.
+
+    Written in this tool's own format rather than JSON Schema, which cannot
+    express which field identifies a record, which must be unique, or an enum's
+    accepted spellings. A round trip through JSON Schema would silently drop
+    those; `parse_spec` reads this back exactly.
+    """
+    schema = BUILTIN_SCHEMA
+    if schema_id != BUILTIN_SCHEMA.schema_id:
+        session_id = _require_session(request)
+        try:
+            record = store.find_schema(schema_id, session_id)
+        except Exception as error:
+            raise _unavailable(error) from None
+        if record is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such schema.")
+        schema = record.schema
+
+    filename = (
+        "".join(
+            character if character.isalnum() or character in "-_" else "-"
+            for character in schema.name.lower()
+        ).strip("-")
+        or "schema"
+    )
+    return PlainTextResponse(
+        to_yaml(schema),
+        media_type="application/yaml",
+        headers={"Content-Disposition": f'attachment; filename="{filename}.schema.yaml"'},
+    )
 
 
 @router.get("/{schema_id}")

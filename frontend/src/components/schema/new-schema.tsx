@@ -4,6 +4,7 @@ import { useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { SchemaBuilder } from "@/components/schema/builder";
 import { ImportSpec } from "@/components/schema/import-spec";
+import { SchemaBuilderSkeleton } from "@/components/ui/skeleton";
 import { api, type ImportedSchema, type TargetSchema } from "@/lib/api";
 
 /**
@@ -55,7 +56,7 @@ export function NewSchema() {
   }, [from]);
 
   if (state === "loading") {
-    return <p className="px-8 py-8 text-[13.5px] text-ink-muted">Loading…</p>;
+    return <SchemaBuilderSkeleton />;
   }
   if (state === "failed") {
     return (

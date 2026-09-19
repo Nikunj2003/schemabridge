@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Badge } from "@/components/ui/status";
 import { Button, ButtonLink } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { api, type SchemaListing, type TargetSchema } from "@/lib/api";
 import { KIND_LABEL } from "@/lib/schema";
 
@@ -82,9 +83,7 @@ export function SchemaList() {
         </p>
       )}
 
-      {listing === null && !error && (
-        <p className="mt-6 text-[13.5px] text-ink-muted">Loading…</p>
-      )}
+      {listing === null && !error && <SchemaListSkeleton />}
 
       {listing && (
         <>
@@ -133,6 +132,29 @@ export function SchemaList() {
           </section>
         </>
       )}
+    </div>
+  );
+}
+
+function SchemaListSkeleton() {
+  return (
+    <div className="mt-7 space-y-7" aria-busy="true">
+      <span className="sr-only">Loading saved schemas…</span>
+      {[0, 1].map((section) => (
+        <section key={section}>
+          <Skeleton className="h-3 w-16" />
+          <div className="panel mt-2.5 px-5 py-5">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0 flex-1 space-y-2.5">
+                <Skeleton className="h-4 w-36" />
+                <Skeleton className="h-3 w-[min(30rem,88%)]" />
+              </div>
+              <Skeleton className="h-8 w-20" />
+            </div>
+            <div className="mt-5 flex gap-3"><Skeleton className="h-3 w-16" /><Skeleton className="h-3 w-20" /></div>
+          </div>
+        </section>
+      ))}
     </div>
   );
 }

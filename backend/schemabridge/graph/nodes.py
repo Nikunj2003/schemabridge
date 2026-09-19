@@ -28,6 +28,7 @@ from schemabridge.domain.models import (
     DeliveryIntent,
     DeliveryState,
     Disposition,
+    EventExecutionBasis,
     IssueOption,
     IssueResolution,
     IssueStatus,
@@ -81,6 +82,7 @@ def _event(
     action: str,
     reason: str,
     *,
+    execution_basis: EventExecutionBasis,
     actor: Actor = Actor.AGENT,
     subject: str | None = None,
     before: str | None = None,
@@ -90,6 +92,7 @@ def _event(
     return AuditEvent(
         seq=seq,
         actor=actor,
+        execution_basis=execution_basis,
         action=action,
         reason=reason,
         subject=subject,
@@ -124,6 +127,7 @@ def propose_mappings(state: MigrationState) -> dict[str, Any]:
                     seq,
                     "mapping_applied",
                     decision.evidence[0] if decision.evidence else "Deterministic match.",
+                    execution_basis=EventExecutionBasis.DETERMINISTIC,
                     subject=header,
                     after=_label(schema, decision.target),
                     basis=decision.basis.value,
@@ -135,6 +139,7 @@ def propose_mappings(state: MigrationState) -> dict[str, Any]:
                     seq,
                     "mapping_escalated",
                     decision.evidence[0] if decision.evidence else "No confident match.",
+                    execution_basis=EventExecutionBasis.DETERMINISTIC,
                     subject=header,
                 )
             )
@@ -146,6 +151,7 @@ def propose_mappings(state: MigrationState) -> dict[str, Any]:
             seq,
             "mapping_summary",
             f"{automatic} of {len(result.decisions)} columns mapped without asking.",
+            execution_basis=EventExecutionBasis.DETERMINISTIC,
             automatic=automatic,
             escalated=len(result.decisions) - automatic,
         )
@@ -208,6 +214,7 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
                 seq,
                 "mapping_applied",
                 accepted.evidence[-1] if accepted.evidence else "Model suggestion, verified.",
+                execution_basis=EventExecutionBasis.MODEL_ASSISTED,
                 subject=header,
                 after=_label(schema, accepted.target),
                 basis=MappingBasis.MODEL_ASSISTED.value,
@@ -222,6 +229,9 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
                 seq,
                 "mapping_suggestion_rejected",
                 why,
+                # The verifier rejected the proposal, so this recorded action is
+                # deterministic—not an accepted model-assisted decision.
+                execution_basis=EventExecutionBasis.DETERMINISTIC,
                 subject=header,
             )
         )
@@ -233,6 +243,7 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
                 seq,
                 "model_unavailable",
                 outcome.unavailable_reason,
+                execution_basis=EventExecutionBasis.DETERMINISTIC,
                 actor=Actor.SYSTEM,
                 columns=len(outcome.considered),
             )
@@ -379,6 +390,7 @@ def await_review(state: MigrationState) -> dict[str, Any]:
                 seq,
                 f"issue_{action.value}",
                 note or f"Reviewer chose to {action.value} this case.",
+                execution_basis=EventExecutionBasis.HUMAN,
                 actor=Actor.REVIEWER,
                 subject=issue.field_name or issue.column_id,
                 after=option_id or value,
@@ -444,6 +456,7 @@ def apply_resolutions(state: MigrationState) -> dict[str, Any]:
                         seq,
                         "mapping_corrected",
                         f"Reviewer mapped this column to {label}.",
+                        execution_basis=EventExecutionBasis.HUMAN,
                         actor=Actor.REVIEWER,
                         subject=columns[column_id].header,
                         after=option.target,
@@ -503,6 +516,7 @@ def reconcile(state: MigrationState) -> dict[str, Any]:
                 f"{len(incoming)} source rows became {len(result.records)} records; "
                 f"{result.merged_rows} were merged as the same record."
             ),
+            execution_basis=EventExecutionBasis.DETERMINISTIC,
             source_rows=len(incoming),
             records=len(result.records),
             merged=result.merged_rows,
@@ -588,6 +602,7 @@ def clean_and_validate(state: MigrationState) -> dict[str, Any]:
                     seq,
                     "value_repaired",
                     f"{_label(schema, repair.field_name)}: {rule}.",
+                    execution_basis=EventExecutionBasis.DETERMINISTIC,
                     subject=_subject_of(schema, record),
                     before=repair.before,
                     after=repair.after,
@@ -601,6 +616,7 @@ def clean_and_validate(state: MigrationState) -> dict[str, Any]:
                     seq,
                     "value_corrected",
                     f"Reviewer supplied a {_label(schema, field_name)}.",
+                    execution_basis=EventExecutionBasis.HUMAN,
                     actor=Actor.REVIEWER,
                     subject=_subject_of(schema, record),
                     before=record.values.get(field_name),
@@ -673,6 +689,7 @@ def clean_and_validate(state: MigrationState) -> dict[str, Any]:
                     seq,
                     "validation_failed_twice",
                     explanation,
+                    execution_basis=EventExecutionBasis.DETERMINISTIC,
                     subject=_subject_of(schema, record),
                     errors=len(errors),
                 )
@@ -685,6 +702,7 @@ def clean_and_validate(state: MigrationState) -> dict[str, Any]:
             seq,
             "validation_summary",
             f"{ready} of {len(validated)} records are valid and ready to deliver.",
+            execution_basis=EventExecutionBasis.DETERMINISTIC,
             ready=ready,
             needs_review=len(validated) - ready,
             repairs=repair_count,
@@ -750,6 +768,7 @@ def deliver(state: MigrationState) -> dict[str, Any]:
                     seq,
                     "delivery_attempted",
                     f"Sending to the destination (attempt {attempt_number}).",
+                    execution_basis=EventExecutionBasis.DETERMINISTIC,
                     subject=subject,
                     attempt=attempt_number,
                 )
@@ -812,6 +831,7 @@ def deliver(state: MigrationState) -> dict[str, Any]:
                     seq,
                     action,
                     result.detail,
+                    execution_basis=EventExecutionBasis.DETERMINISTIC,
                     subject=subject,
                     after=result.target_id,
                     status=result.status_code,
@@ -835,6 +855,7 @@ def deliver(state: MigrationState) -> dict[str, Any]:
             seq,
             "delivery_summary",
             summary + ".",
+            execution_basis=EventExecutionBasis.DETERMINISTIC,
             delivered=delivered,
             failed=failed,
             retrying=waiting,

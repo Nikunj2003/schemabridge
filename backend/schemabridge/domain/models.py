@@ -323,6 +323,16 @@ class DeliveryIntent(Frozen):
 # ---------------------------------------------------------------------------
 
 
+class EventExecutionBasis(StrEnum):
+    """How the recorded action was carried out, independently of its actor."""
+
+    DETERMINISTIC = "deterministic"
+    MODEL_ASSISTED = "model_assisted"
+    HUMAN = "human"
+    #: Used for audit events written before execution provenance was recorded.
+    UNKNOWN = "unknown"
+
+
 class AuditEvent(Frozen):
     """One recorded decision. Doubles as the UI's activity feed."""
 
@@ -330,6 +340,8 @@ class AuditEvent(Frozen):
     seq: int
     at: datetime = Field(default_factory=utc_now)
     actor: Actor
+    #: How the action was executed. An agent actor can use either policy or a model.
+    execution_basis: EventExecutionBasis = EventExecutionBasis.UNKNOWN
     action: str
     #: Why this happened: the policy rule, or the reviewer's choice.
     reason: str

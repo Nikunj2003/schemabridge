@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
@@ -12,6 +12,7 @@ from langgraph.types import Command
 from schemabridge.domain.models import (
     ColumnProfile,
     Disposition,
+    EventExecutionBasis,
     IssueStatus,
     MappingOutcome,
     RunPhase,
@@ -21,6 +22,7 @@ from schemabridge.domain.models import (
 )
 from schemabridge.domain.target import BUILTIN_SCHEMA
 from schemabridge.graph.builder import compile_graph
+from schemabridge.graph.state import MigrationState
 from schemabridge.ingest.csv_source import parse_csv
 from schemabridge.ingest.profile import profile_columns
 from schemabridge.ingest.xlsx_source import parse_xlsx
@@ -130,6 +132,35 @@ class TestCleanRunNeedsNoHuman:
         # Sequence numbers are the UI's polling cursor, so they must be unique.
         seqs = [e.seq for e in result["events"]]
         assert len(seqs) == len(set(seqs))
+        # An agent actor does not imply model use: this run followed policy only.
+        assert {e.execution_basis for e in result["events"]} == {EventExecutionBasis.DETERMINISTIC}
+
+    def test_model_assistance_records_its_own_execution_basis(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from schemabridge.agent.propose import AcceptedMapping, ProposalOutcome
+        from schemabridge.graph import nodes
+
+        state = initial_state(["employees-clean.csv"])
+        column = state["columns"][0]
+        state["unresolved_columns"] = (column.id,)
+        monkeypatch.setattr(
+            nodes,
+            "propose_unresolved_mappings",
+            lambda *_args, **_kwargs: ProposalOutcome(
+                accepted=(
+                    AcceptedMapping(
+                        column_id=column.id,
+                        target="employeeId",
+                        evidence=("Verified model suggestion.",),
+                    ),
+                )
+            ),
+        )
+
+        result = nodes.assist_with_model(cast(MigrationState, state))
+
+        assert result["events"][0].execution_basis is EventExecutionBasis.MODEL_ASSISTED
 
 
 class TestMessyRunPausesForAHuman:
@@ -188,6 +219,7 @@ class TestMessyRunPausesForAHuman:
         # The decision is attributed to the reviewer, not the agent.
         reviewer_events = [e for e in resumed["events"] if e.actor == "reviewer"]
         assert reviewer_events
+        assert {e.execution_basis for e in reviewer_events} == {EventExecutionBasis.HUMAN}
 
     def test_a_correction_is_revalidated_not_trusted(self, graph: Any) -> None:
         config = {"configurable": {"thread_id": "messy-4"}}

@@ -16,6 +16,7 @@ from schemabridge.domain.models import (
     CanonicalRecord,
     DeliveryIntent,
     Disposition,
+    EventExecutionBasis,
     IssueStatus,
     MappingOutcome,
     ReviewIssue,
@@ -43,6 +44,15 @@ def _enum_value(value: Any, default: str = "") -> str:
     if value is None:
         return default
     return str(getattr(value, "value", value))
+
+
+def _event_execution_basis(event: Any) -> str:
+    """Return a safe basis for new, legacy, and degraded checkpoint events."""
+    value = _enum_value(_attr(event, "execution_basis"), EventExecutionBasis.UNKNOWN.value)
+    try:
+        return EventExecutionBasis(value).value
+    except (TypeError, ValueError):
+        return EventExecutionBasis.UNKNOWN.value
 
 
 #: Phases where the UI should keep polling.
@@ -101,6 +111,7 @@ class EventView(BaseModel):
     seq: int
     at: str
     actor: str
+    execution_basis: str
     action: str
     reason: str
     subject: str | None
@@ -371,6 +382,7 @@ def _event_views(events: tuple[AuditEvent, ...], since: int) -> list[EventView]:
                 seq=seq,
                 at=at.isoformat() if hasattr(at, "isoformat") else str(at or ""),
                 actor=_enum_value(_attr(event, "actor"), "agent"),
+                execution_basis=_event_execution_basis(event),
                 action=_attr(event, "action", ""),
                 reason=_attr(event, "reason", ""),
                 subject=_attr(event, "subject"),

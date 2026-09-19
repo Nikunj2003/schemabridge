@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Wordmark } from "@/components/brand/logo";
+import { HexGridBackground } from "@/components/marketing/hex-grid-background";
 import { MergeFigure } from "@/components/marketing/merge-figure";
 import { SiteHeader } from "@/components/marketing/site-header";
 import { ButtonLink } from "@/components/ui/button";
@@ -14,48 +15,51 @@ import { ThemeToggle } from "@/components/theme-toggle";
  */
 export default function LandingPage() {
   return (
-    <div className="flex min-h-dvh flex-col">
+    <div className="marketing-page flex min-h-dvh flex-col">
       <SiteHeader />
 
       <main className="flex-1">
-        <section className="mx-auto max-w-[70rem] px-4 pt-14 pb-16 sm:px-8 sm:pt-20">
-          <div className="grid items-center gap-10 lg:grid-cols-[1fr_minmax(0,26rem)] lg:gap-14">
-            <div>
-              <p className="eyebrow">Employee data migration</p>
-              <h1 className="mt-3 max-w-[22ch] font-display text-[34px] leading-[1.1] sm:text-[44px]">
-                Bring messy employee files together.
+        <section className="marketing-hero relative overflow-hidden">
+          <HexGridBackground />
+          <div className="marketing-frame relative grid items-center gap-11 py-15 sm:py-21 lg:grid-cols-[minmax(0,1fr)_minmax(22rem,28rem)] lg:gap-18">
+            <div className="relative z-10">
+              <p className="marketing-kicker">A careful path from spreadsheet to system</p>
+              <h1 className="marketing-hero-title mt-4 max-w-[16ch] font-display">
+                Make the first clean employee record.
               </h1>
-              <p className="mt-4 max-w-[46ch] text-[16px] leading-relaxed text-ink-muted">
-                Hand over the exports your client actually sent you. The agent
-                matches the columns, cleans what is safe to clean, and stops to
-                ask you only when a choice would change what gets migrated.
+              <p className="mt-5 max-w-[52ch] text-[16px] leading-relaxed text-ink-muted sm:text-[17px]">
+                Hand over the exports your client actually sent you. SchemaBridge
+                matches the columns, cleans what is safe to clean, and stops only
+                when a choice would change what gets migrated.
               </p>
 
-              <div className="mt-7 flex flex-wrap items-center gap-3">
+              <div className="mt-8 flex flex-wrap items-center gap-x-5 gap-y-3">
                 <ButtonLink href="/signin" variant="primary" size="lg">
-                  Get started
+                  Start a migration
                 </ButtonLink>
-                <a
-                  href="#how"
-                  className="text-[14px] font-medium text-ink-muted underline-offset-4 hover:text-ink hover:underline"
-                >
+                <a href="#how" className="marketing-text-link text-[14px] font-medium text-ink-muted">
                   See how it works
                 </a>
               </div>
 
-              <p className="mt-4 text-[13px] text-ink-subtle">
-                Free, synthetic data only, 10 migrations a day.
+              <p className="mt-5 text-[13px] text-ink-subtle">
+                Free with synthetic data only. Up to 10 migrations a day.
               </p>
             </div>
 
-            <MergeFigure />
+            <div className="relative z-10 lg:justify-self-end">
+              <MergeFigure />
+            </div>
           </div>
         </section>
 
-        <section id="how" className="border-y border-line bg-surface">
-          <div className="mx-auto max-w-[70rem] px-4 py-14 sm:px-8">
-            <h2 className="font-display text-[24px]">How it works</h2>
-            <ol className="mt-7 grid gap-6 sm:grid-cols-3">
+        <section id="how" className="marketing-section marketing-section-muted scroll-mt-16">
+          <div className="marketing-frame py-14 sm:py-18">
+            <div className="max-w-[48rem]">
+              <p className="marketing-kicker">From raw files to a reviewable result</p>
+              <h2 className="marketing-section-title mt-3 font-display">A migration with a clear next step</h2>
+            </div>
+            <ol className="marketing-steps mt-9 grid gap-7 sm:grid-cols-3 sm:gap-8">
               <Step
                 n={1}
                 title="Add the exports"
@@ -75,47 +79,49 @@ export default function LandingPage() {
           </div>
         </section>
 
-        <section className="mx-auto max-w-[70rem] px-4 py-14 sm:px-8">
-          <div className="grid gap-8 lg:grid-cols-2 lg:gap-14">
-            <div>
-              <h2 className="font-display text-[22px]">It decides on its own when it is safe to</h2>
-              <ul className="mt-4 space-y-2.5">
-                <Point>Matches <span className="raw">emp_nm</span>, <span className="raw">Employee Code</span> and <span className="raw">doj</span> onto the right fields without being told</Point>
-                <Point>Combines rows for the same employee when the files agree</Point>
-                <Point>Trims stray spaces, fixes casing, and writes dates one way</Point>
-                <Point>Keeps leading zeros — <span className="raw">000123</span> stays <span className="raw">000123</span></Point>
-                <Point>Sends valid records to the destination and retries the ones that fail for a transient reason</Point>
-              </ul>
-            </div>
-
-            <div>
-              <h2 className="font-display text-[22px]">It stops when guessing would be wrong</h2>
-              <ul className="mt-4 space-y-2.5">
-                <Point><span className="raw">03/04/2026</span> — that is two real dates, so it asks which one</Point>
-                <Point>Two files with different start dates for the same employee</Point>
-                <Point>A column nothing in the destination corresponds to</Point>
-                <Point>An address that is still invalid after a repair was attempted</Point>
-                <Point>A record the destination itself refuses, with the destination&rsquo;s own reason shown</Point>
-              </ul>
-            </div>
+        <section className="marketing-section">
+          <div className="marketing-frame grid gap-12 py-15 sm:py-20 lg:grid-cols-2 lg:gap-18">
+            <DecisionList
+              title="It decides on its own when it is safe to"
+              points={[
+                <>Matches <span className="raw">emp_nm</span>, <span className="raw">Employee Code</span> and <span className="raw">doj</span> onto the right fields without being told</>,
+                "Combines rows for the same employee when the files agree",
+                "Trims stray spaces, fixes casing, and writes dates one way",
+                <>Keeps leading zeros — <span className="raw">000123</span> stays <span className="raw">000123</span></>,
+                "Sends valid records to the destination and retries the ones that fail for a transient reason",
+              ]}
+            />
+            <DecisionList
+              title="It stops when guessing would be wrong"
+              points={[
+                <><span className="raw">03/04/2026</span> — that is two real dates, so it asks which one</>,
+                "Two files with different start dates for the same employee",
+                "A column nothing in the destination corresponds to",
+                "An address that is still invalid after a repair was attempted",
+                <>A record the destination itself refuses, with the destination&rsquo;s own reason shown</>,
+              ]}
+            />
           </div>
         </section>
 
-        <section id="limits" className="border-t border-line bg-surface">
-          <div className="mx-auto max-w-[70rem] px-4 py-14 sm:px-8">
-            <h2 className="font-display text-[22px]">What it does not do</h2>
-            <p className="mt-2 max-w-[62ch] text-[14px] text-ink-muted">
-              Plainly, so nothing here is a surprise later.
-            </p>
-            <dl className="mt-6 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+        <section id="limits" className="marketing-section marketing-section-muted scroll-mt-16">
+          <div className="marketing-frame py-14 sm:py-18">
+            <div className="max-w-[48rem]">
+              <p className="marketing-kicker">The boundary is part of the product</p>
+              <h2 className="marketing-section-title mt-3 font-display">What it does not do</h2>
+              <p className="mt-3 max-w-[58ch] text-[15px] leading-relaxed text-ink-muted">
+                Plainly, so nothing here is a surprise later.
+              </p>
+            </div>
+            <dl className="marketing-limits mt-9 grid gap-x-8 gap-y-7 sm:grid-cols-2 lg:grid-cols-4">
               <Limit term="It is a demo destination">
                 Records go to a simulated HR system inside this app. Nothing is sent anywhere else.
               </Limit>
               <Limit term="Synthetic data only">
                 Do not upload real personal information. Uploads are deleted after 48 hours.
               </Limit>
-              <Limit term="Employee records only">
-                One fixed destination shape. It does not learn arbitrary schemas.
+              <Limit term="Schemas need review">
+                Build, import, or detect a target shape, then confirm its fields before relying on it for a client.
               </Limit>
               <Limit term="Small files">
                 A few thousand rows at most — this is a workbench, not a batch pipeline.
@@ -125,21 +131,17 @@ export default function LandingPage() {
         </section>
       </main>
 
-      <footer className="border-t border-line">
-        <div className="mx-auto flex max-w-[70rem] flex-col gap-4 px-4 py-7 sm:flex-row sm:items-center sm:px-8">
+      <footer className="marketing-footer border-t border-line">
+        <div className="marketing-frame flex flex-col gap-5 py-7 sm:flex-row sm:items-center">
           <Wordmark withMark={false} />
+          <p className="max-w-[44ch] text-[12.5px] text-ink-subtle sm:ml-2">
+            A transparent workbench for employee-record migrations.
+          </p>
           <div className="flex items-center gap-5 text-[13px] text-ink-muted sm:ml-auto">
-            <a
-              href="https://github.com/Nikunj2003/schemabridge"
-              target="_blank"
-              rel="noreferrer"
-              className="hover:text-ink"
-            >
+            <a href="https://github.com/Nikunj2003/schemabridge" target="_blank" rel="noreferrer" className="marketing-nav-link">
               Source
             </a>
-            <Link href="/signin" className="hover:text-ink">
-              Sign in
-            </Link>
+            <Link href="/signin" className="marketing-nav-link">Sign in</Link>
             <ThemeToggle />
           </div>
         </div>
@@ -150,19 +152,30 @@ export default function LandingPage() {
 
 function Step({ n, title, body }: { n: number; title: string; body: string }) {
   return (
-    <li>
+    <li className="marketing-step">
       <span className="flex size-7 items-center justify-center rounded-full bg-accent-soft font-display text-[13px] font-semibold text-accent-ink">
         {n}
       </span>
-      <h3 className="mt-3 text-[15.5px] font-semibold">{title}</h3>
-      <p className="mt-1.5 text-[13.5px] leading-relaxed text-ink-muted">{body}</p>
+      <h3 className="mt-4 text-[16px] font-semibold">{title}</h3>
+      <p className="mt-2 text-[13.5px] leading-relaxed text-ink-muted">{body}</p>
     </li>
+  );
+}
+
+function DecisionList({ title, points }: { title: string; points: React.ReactNode[] }) {
+  return (
+    <div>
+      <h2 className="max-w-[23ch] font-display text-[24px] leading-[1.16] sm:text-[27px]">{title}</h2>
+      <ul className="mt-5 space-y-3">
+        {points.map((point, index) => <Point key={index}>{point}</Point>)}
+      </ul>
+    </div>
   );
 }
 
 function Point({ children }: { children: React.ReactNode }) {
   return (
-    <li className="flex gap-2.5 text-[13.5px] leading-relaxed text-ink-muted">
+    <li className="flex gap-3 text-[13.5px] leading-relaxed text-ink-muted">
       <svg viewBox="0 0 16 16" className="mt-1 size-3.5 shrink-0 text-accent" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden>
         <path d="M3 8.5l3.5 3.5L13 4" />
       </svg>
@@ -174,8 +187,8 @@ function Point({ children }: { children: React.ReactNode }) {
 function Limit({ term, children }: { term: string; children: React.ReactNode }) {
   return (
     <div>
-      <dt className="text-[13.5px] font-semibold">{term}</dt>
-      <dd className="mt-1 text-[13px] leading-relaxed text-ink-muted">{children}</dd>
+      <dt className="text-[14px] font-semibold">{term}</dt>
+      <dd className="mt-1.5 text-[13px] leading-relaxed text-ink-muted">{children}</dd>
     </div>
   );
 }

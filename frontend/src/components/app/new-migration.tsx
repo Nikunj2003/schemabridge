@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Select, Textarea } from "@/components/ui/field";
+import { Skeleton } from "@/components/ui/skeleton";
 import { api, type SchemaListing, type TargetSchema } from "@/lib/api";
 import { fileSize } from "@/lib/present";
 import { cn } from "@/lib/utils";
@@ -38,6 +39,7 @@ export function NewMigration() {
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [listing, setListing] = useState<SchemaListing | null>(null);
+  const [listingError, setListingError] = useState(false);
   const [choice, setChoice] = useState<string | null>(null);
   const [saved, setSaved] = useState<string>("");
   const [spec, setSpec] = useState("");
@@ -50,12 +52,14 @@ export function NewMigration() {
         const loaded = await api.schemas.list();
         if (!live) return;
         setListing(loaded);
+        setListingError(false);
         // Default to the built-in template rather than to nothing, so the
         // button is usable the moment a file is added.
         setChoice(loaded.builtin.schema_id);
       } catch {
-        // Not fatal: omitting the schema uses the backend's own default.
-        if (live) setListing(null);
+        // Not fatal: omitting the schema uses the backend's own default, but the
+        // page still distinguishes an unavailable service from a pending fetch.
+        if (live) setListingError(true);
       }
     })();
     return () => {
@@ -201,10 +205,12 @@ export function NewMigration() {
           The contract your records are mapped onto and checked against.
         </p>
 
-        {listing === null ? (
+        {listing === null && !listingError ? (
+          <SchemaChoiceSkeleton />
+        ) : listing === null ? (
           <p className="panel mt-3 px-4 py-3 text-[13px] text-ink-muted">
-            Saved schemas are unavailable, so this run will use the built-in
-            employee shape.
+            Saved schemas could not be reached. This run will use the built-in
+            employee shape unless you try again after reloading.
           </p>
         ) : (
           <div className="mt-3 space-y-2">
@@ -342,6 +348,20 @@ export function NewMigration() {
           would change what gets migrated.
         </p>
       </div>
+    </div>
+  );
+}
+
+function SchemaChoiceSkeleton() {
+  return (
+    <div className="mt-3 space-y-2" aria-busy="true">
+      <span className="sr-only">Loading destination schema choices…</span>
+      {[0, 1, 2].map((index) => (
+        <div key={index} className="rounded-md border border-line bg-surface px-4 py-3.5">
+          <Skeleton className="h-4 w-36" />
+          <Skeleton className="mt-2 h-3 w-[min(28rem,88%)]" />
+        </div>
+      ))}
     </div>
   );
 }

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { SchemaBuilder } from "@/components/schema/builder";
+import { SchemaBuilderSkeleton } from "@/components/ui/skeleton";
 import { api, type TargetSchema } from "@/lib/api";
 
 /** Editing a saved schema. Loads it, then hands the draft to the builder. */
@@ -45,7 +46,7 @@ export function EditSchema({ schemaId }: { schemaId: string }) {
     );
   }
   if (!schema) {
-    return <p className="px-8 py-8 text-[13.5px] text-ink-muted">Loading…</p>;
+    return <SchemaBuilderSkeleton />;
   }
   // Keyed on the version so a reload after a save re-seeds the draft rather
   // than leaving the builder holding the previous revision's fields.

@@ -178,6 +178,164 @@
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
   }
+
+  /* Shared landing-page alignment and vertical rhythm. These stay scoped so
+     the compact workbench screens retain their document-like density. */
+  .marketing-page {
+    background: var(--canvas);
+  }
+
+  .marketing-frame {
+    width: min(100% - 2rem, 72rem);
+    margin-inline: auto;
+  }
+
+  .marketing-hero {
+    border-bottom: 1px solid var(--line);
+  }
+
+  .marketing-hex-grid {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+
+  .marketing-kicker {
+    color: var(--accent-ink);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    line-height: 1.35;
+  }
+
+  .marketing-hero-title {
+    font-size: clamp(2.45rem, 5.5vw, 4.45rem);
+    font-weight: 600;
+    letter-spacing: -0.045em;
+    line-height: 0.99;
+  }
+
+  .marketing-section-title {
+    font-size: clamp(1.75rem, 3vw, 2.35rem);
+    letter-spacing: -0.035em;
+    line-height: 1.06;
+  }
+
+  .marketing-section-muted {
+    border-block: 1px solid var(--line);
+    background: var(--surface);
+  }
+
+  .marketing-steps {
+    counter-reset: migration-step;
+  }
+
+  .marketing-step {
+    position: relative;
+  }
+
+  .marketing-step:not(:last-child)::after {
+    position: absolute;
+    top: 0.85rem;
+    left: 2.25rem;
+    right: -1rem;
+    height: 1px;
+    background: var(--line-strong);
+    content: "";
+  }
+
+  .merge-figure {
+    box-shadow: var(--shadow-pop);
+  }
+
+  .merge-figure-bridge {
+    position: relative;
+  }
+
+  .marketing-nav-link {
+    text-decoration-line: none;
+    text-underline-offset: 0.25rem;
+    transition: color 150ms ease, text-decoration-color 150ms ease;
+  }
+
+  .marketing-nav-link:hover {
+    color: var(--ink);
+    text-decoration-line: underline;
+  }
+
+  .marketing-text-link {
+    text-decoration-line: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 0.32rem;
+    transition: color 150ms ease, text-decoration-color 150ms ease;
+  }
+
+  .marketing-text-link:hover {
+    color: var(--ink);
+    text-decoration-color: var(--accent);
+  }
+
+  .marketing-footer {
+    background: color-mix(in srgb, var(--canvas) 88%, var(--accent-soft));
+  }
+
+  /* The three choices read as a small honeycomb cluster, but buttons retain a
+     full 40px hit target and the regular focus ring from the base layer. */
+  .theme-picker {
+    isolation: isolate;
+    gap: 0.0625rem;
+  }
+
+  .theme-picker-cell {
+    clip-path: polygon(25% 6.7%, 75% 6.7%, 100% 50%, 75% 93.3%, 25% 93.3%, 0 50%);
+    background: transparent;
+  }
+
+  .theme-picker-cell-selected {
+    background: var(--accent-soft);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+
+  @media (min-width: 40rem) {
+    .marketing-frame {
+      width: min(100% - 3rem, 72rem);
+    }
+  }
+
+  @media (min-width: 64rem) {
+    .marketing-frame {
+      width: min(100% - 4rem, 72rem);
+    }
+  }
+
+  @media (max-width: 39.999rem) {
+    .marketing-step:not(:last-child)::after {
+      display: none;
+    }
+  }
+}
+
+@keyframes skeleton-pulse {
+  0%, 100% {
+    opacity: 0.54;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes event-arrival {
+  from {
+    opacity: 0.45;
+    transform: translateY(-2px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 ::-webkit-scrollbar {

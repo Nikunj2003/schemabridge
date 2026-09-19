@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { ButtonLink } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 
 interface Row {
@@ -44,9 +45,7 @@ export function MigrationList() {
         </p>
       )}
 
-      {rows === null && !error && (
-        <p className="mt-6 text-[14px] text-ink-muted">Loading…</p>
-      )}
+      {rows === null && !error && <MigrationListSkeleton />}
 
       {rows !== null && rows.length === 0 && (
         <div className="panel mt-6 px-5 py-6">
@@ -89,6 +88,23 @@ export function MigrationList() {
       <p className="mt-8 text-[12.5px] text-ink-muted">
         Migrations are kept for 48 hours, then deleted.
       </p>
+    </div>
+  );
+}
+
+function MigrationListSkeleton() {
+  return (
+    <div className="mt-6 overflow-hidden rounded-lg border border-line bg-surface" aria-busy="true">
+      <span className="sr-only">Loading migrations…</span>
+      {[0, 1, 2].map((index) => (
+        <div key={index} className="flex items-center gap-4 border-b border-line px-5 py-4 last:border-b-0">
+          <div className="min-w-0 flex-1 space-y-2">
+            <Skeleton className="h-4 w-[min(22rem,78%)]" />
+            <Skeleton className="h-3 w-28" />
+          </div>
+          <Skeleton className="h-4 w-10" />
+        </div>
+      ))}
     </div>
   );
 }

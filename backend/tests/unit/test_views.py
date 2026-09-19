@@ -10,12 +10,14 @@ from __future__ import annotations
 from schemabridge.api.views import build_run_view
 from schemabridge.domain.models import (
     Actor,
+    AuditEvent,
     CanonicalRecord,
     DeliveryAttempt,
     DeliveryIntent,
     DeliveryOutcome,
     DeliveryState,
     Disposition,
+    EventExecutionBasis,
     MappingBasis,
     MappingDecision,
     MappingOutcome,
@@ -208,3 +210,36 @@ def test_duplicates_are_not_reported_before_records_exist() -> None:
     assert view.counters.source_rows == 3
     assert view.counters.records == 0
     assert view.counters.merged == 0
+
+
+def test_event_execution_basis_is_projected() -> None:
+    event = AuditEvent(
+        seq=1,
+        actor=Actor.AGENT,
+        execution_basis=EventExecutionBasis.MODEL_ASSISTED,
+        action="mapping_applied",
+        reason="A verified model suggestion mapped the column.",
+    )
+
+    view = build_run_view("run_test", _state(events=(event,)), paused=False, runnable=False)
+
+    assert view.events[0].execution_basis == "model_assisted"
+
+
+def test_legacy_or_degraded_event_execution_basis_is_unknown() -> None:
+    events = (
+        # Existing checkpoints predate execution provenance entirely.
+        {"seq": 1, "actor": "agent", "action": "mapping_applied", "reason": "Legacy."},
+        # A corrupted checkpoint must not surface unrecognised provenance as fact.
+        {
+            "seq": 2,
+            "actor": "agent",
+            "execution_basis": "not-recorded",
+            "action": "mapping_applied",
+            "reason": "Degraded.",
+        },
+    )
+
+    view = build_run_view("run_test", _state(events=events), paused=False, runnable=False)
+
+    assert [event.execution_basis for event in view.events] == ["unknown", "unknown"]

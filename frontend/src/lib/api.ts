@@ -96,10 +96,13 @@ export interface MigrationRecord {
   target_id: string | null;
 }
 
+export type ExecutionBasis = "deterministic" | "model_assisted" | "human" | "unknown";
+
 export interface ActivityEvent {
   seq: number;
   at: string;
   actor: "agent" | "reviewer" | "system";
+  execution_basis: ExecutionBasis;
   action: string;
   reason: string;
   subject: string | null;

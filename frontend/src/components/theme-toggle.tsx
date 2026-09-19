@@ -1,28 +1,23 @@
 "use client";
 
-import { useSyncExternalStore } from "react";
+import { useRef, useSyncExternalStore } from "react";
 import { useTheme } from "next-themes";
 import { cn } from "@/lib/utils";
 
 const OPTIONS = [
   { value: "light", label: "Light" },
   { value: "dark", label: "Dark" },
-  { value: "system", label: "System" },
+  { value: "system", label: "Use device setting" },
 ] as const;
 
-/**
- * Light, dark or follow the device. The choice is remembered.
- *
- * Three labelled segments where there is room, a single cycling button where
- * there is not — 213px of header chrome is what pushed a phone into sideways
- * scrolling.
- */
+type ThemeOption = (typeof OPTIONS)[number];
+
+/** A remembered colour preference with radio semantics on larger screens. */
 export function ThemeToggle() {
   const { theme, setTheme } = useTheme();
-  // The server cannot know the stored preference, so the control renders only
-  // once the client has it — otherwise the wrong option looks selected. Read as
-  // a hydration signal rather than set in an effect, which would cost an extra
-  // render pass on every page.
+  const radioRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  // The server cannot know the stored preference. Keep the pre-hydration shape
+  // stable so an option never appears selected before the client takes over.
   const hydrated = useSyncExternalStore(
     () => () => {},
     () => true,
@@ -33,17 +28,42 @@ export function ThemeToggle() {
     return (
       <>
         <div className="size-8 sm:hidden" aria-hidden />
-        <div className="hidden h-8 w-[152px] sm:block" aria-hidden />
+        <div className="hidden h-10 w-[112px] sm:block" aria-hidden />
       </>
     );
   }
 
-  const current = OPTIONS.find((option) => option.value === theme) ?? OPTIONS[2];
-  const next = OPTIONS[(OPTIONS.indexOf(current) + 1) % OPTIONS.length];
+  const currentIndex = Math.max(0, OPTIONS.findIndex((option) => option.value === theme));
+  const current = OPTIONS[currentIndex];
+  const next = OPTIONS[(currentIndex + 1) % OPTIONS.length];
+
+  const choose = (index: number, focus = false) => {
+    setTheme(OPTIONS[index].value);
+    if (focus) radioRefs.current[index]?.focus();
+  };
+
+  const handleRadioKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      nextIndex = (index + 1) % OPTIONS.length;
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      nextIndex = (index - 1 + OPTIONS.length) % OPTIONS.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = OPTIONS.length - 1;
+    }
+
+    if (nextIndex !== null) {
+      event.preventDefault();
+      choose(nextIndex, true);
+    }
+  };
 
   return (
     <>
       <button
+        type="button"
         onClick={() => setTheme(next.value)}
         title={`Theme: ${current.label}. Switch to ${next.label}.`}
         className="flex size-8 shrink-0 items-center justify-center rounded-md border border-line bg-surface text-ink-muted hover:text-ink sm:hidden"
@@ -55,28 +75,40 @@ export function ThemeToggle() {
       <div
         role="radiogroup"
         aria-label="Colour theme"
-        className="hidden items-center gap-0.5 rounded-md border border-line bg-surface p-0.5 sm:flex"
+        className="theme-picker hidden items-center sm:flex"
       >
-        {OPTIONS.map((option) => (
-          <button
-            key={option.value}
-            role="radio"
-            aria-checked={theme === option.value}
-            onClick={() => setTheme(option.value)}
-            className={cn(
-              "rounded px-2 py-1 text-[12px] font-medium transition-colors",
-              theme === option.value ? "bg-accent-soft text-accent-ink" : "text-ink-muted hover:text-ink",
-            )}
-          >
-            {option.label}
-          </button>
-        ))}
+        {OPTIONS.map((option, index) => {
+          const selected = index === currentIndex;
+          return (
+            <button
+              key={option.value}
+              ref={(element) => {
+                radioRefs.current[index] = element;
+              }}
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              aria-label={option.label}
+              tabIndex={selected ? 0 : -1}
+              title={option.label}
+              onClick={() => choose(index)}
+              onKeyDown={(event) => handleRadioKeyDown(event, index)}
+              className={cn(
+                "theme-picker-cell flex size-10 items-center justify-center text-ink-muted transition-colors",
+                selected ? "theme-picker-cell-selected text-accent-ink" : "hover:text-ink",
+              )}
+            >
+              <Glyph value={option.value} />
+              <span className="sr-only">{option.label}</span>
+            </button>
+          );
+        })}
       </div>
     </>
   );
 }
 
-function Glyph({ value }: { value: (typeof OPTIONS)[number]["value"] }) {
+function Glyph({ value }: { value: ThemeOption["value"] }) {
   const common = {
     viewBox: "0 0 24 24",
     className: "size-4",

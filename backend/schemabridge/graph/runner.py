@@ -1,12 +1,27 @@
 """Driving the workflow from a request.
 
-One `advance` call runs the graph until it either finishes or pauses for a human.
-Each call is bounded and returns a checkpoint, so a long migration progresses
-across several requests rather than holding one open past the platform's limit.
+Execution is deliberately **bounded**: one call runs a limited number of graph
+supersteps and then stops, leaving a checkpoint behind. The browser calls again
+to continue. Three things fall out of that, all of them requirements rather than
+conveniences:
 
-The browser drives this loop, which is a real constraint worth stating plainly
-rather than hiding: closing the tab pauses scheduling, not persistence. Reopening
-the run resumes from the last checkpoint.
+* **Creating a run returns immediately.** Parsing the files is enough to accept
+  the upload; mapping and delivery happen in later calls. A clean migration used
+  to finish inside the create request, so the run screen opened on a completed
+  run and the person never saw it work.
+* **A long migration cannot outlive the platform's request limit**, because no
+  single call tries to run the whole thing.
+* **Progress is observable**, since each call commits a checkpoint that the
+  independent polling loop can read.
+
+Stopping for scheduling and stopping for a person look the same in `snapshot.next`
+— both leave it non-empty. They are told apart by whether any task carries an
+`interrupt`, which is the only signal that someone is actually being asked
+something. Confusing the two would either show "waiting for you" when nobody was
+asked, or report a paused run as finished.
+
+Closing the tab pauses scheduling, not persistence: the state is checkpointed, so
+reopening the run continues from where it stopped.
 """
 
 from __future__ import annotations
@@ -20,6 +35,17 @@ from schemabridge.domain.models import RunPhase
 from schemabridge.graph.builder import compile_graph
 from schemabridge.graph.checkpointer import build_checkpointer
 
+#: Supersteps per request. Small enough that each call returns quickly and the
+#: next poll shows movement; large enough that a run does not need dozens of
+#: round trips. Delivery loops one superstep per batch, so this also bounds how
+#: much sending happens before the UI hears about it.
+_STEPS_PER_CALL = 2
+
+#: Supersteps allowed while accepting an upload. Zero: the files are parsed by
+#: the caller, and the first real step belongs to the first advance so the run
+#: screen can open before any work has happened.
+_STEPS_ON_CREATE = 0
+
 
 def _config(run_id: str) -> dict[str, Any]:
     """The graph's per-run configuration. `thread_id` is the run itself."""
@@ -28,14 +54,15 @@ def _config(run_id: str) -> dict[str, Any]:
 
 @dataclass(frozen=True, slots=True)
 class AdvanceResult:
-    """Where the run stands after one step."""
+    """Where the run stands after one bounded call."""
 
     phase: RunPhase
+    #: True only when a person is genuinely being asked something.
     paused: bool
     #: Escalation payloads awaiting a decision, if paused.
     pending: tuple[dict[str, Any], ...]
     state: dict[str, Any]
-    #: Whether another advance would make progress.
+    #: Whether calling again would make progress.
     runnable: bool
 
 
@@ -43,51 +70,62 @@ def _graph() -> Any:
     return compile_graph(build_checkpointer())
 
 
-def _pending_from(result: dict[str, Any]) -> tuple[dict[str, Any], ...]:
-    """Escalations the graph is waiting on."""
-    payloads: list[dict[str, Any]] = []
-    for pending in result.get("__interrupt__", ()) or ():
-        value = getattr(pending, "value", None)
-        if isinstance(value, dict):
-            payloads.extend(value.get("issues", []))
-    return tuple(payloads)
+def _interrupts(snapshot: Any) -> tuple[dict[str, Any], ...]:
+    """Escalations the graph is actually waiting on, from the checkpoint."""
+    return tuple(
+        issue
+        for task in snapshot.tasks
+        for pending in task.interrupts
+        if isinstance(getattr(pending, "value", None), dict)
+        for issue in pending.value.get("issues", [])
+    )
 
 
-def _runnable(phase: RunPhase, paused: bool, state: dict[str, Any]) -> bool:
-    """Whether calling advance again would achieve anything.
+def _run_bounded(graph: Any, run_id: str, payload: Any, limit: int) -> None:
+    """Run at most `limit` supersteps, then leave the rest for the next call.
 
-    A scheduled retry counts as work: the run is not finished, it is waiting.
-    Reporting it as complete would leave a record permanently undelivered with
-    nothing prompting anyone to notice.
+    Breaking out of the stream stops before the next task is started; the
+    checkpoint written by the last completed superstep is what the following call
+    resumes from. A limit of zero still submits the input, so the initial state is
+    persisted without executing a node.
     """
-    if paused:
-        return False
-    return phase not in {
-        RunPhase.COMPLETE,
-        RunPhase.COMPLETE_WITH_FAILURES,
-        RunPhase.BLOCKED,
-    }
+    stream = graph.stream(payload, _config(run_id), stream_mode="updates")
+    if limit <= 0:
+        # Nothing to execute, but the input must still be checkpointed. Closing
+        # the generator without consuming it would discard the state entirely.
+        graph.update_state(_config(run_id), payload) if payload is not None else None
+        stream.close()
+        return
+
+    completed = 0
+    try:
+        for _ in stream:
+            completed += 1
+            if completed >= limit:
+                break
+    finally:
+        stream.close()
 
 
 def start(initial_state: dict[str, Any], run_id: str) -> AdvanceResult:
-    """Begin a run."""
+    """Accept a run: persist the parsed sources, execute nothing yet."""
     graph = _graph()
-    result = graph.invoke(initial_state, _config(run_id))
-    return _describe(graph, run_id, result)
+    _run_bounded(graph, run_id, initial_state, _STEPS_ON_CREATE)
+    return _describe(graph, run_id)
 
 
 def advance(run_id: str) -> AdvanceResult:
-    """Continue a run that has work left, such as a scheduled retry."""
+    """Do the next bounded piece of work."""
     graph = _graph()
-    result = graph.invoke(None, _config(run_id))
-    return _describe(graph, run_id, result)
+    _run_bounded(graph, run_id, None, _STEPS_PER_CALL)
+    return _describe(graph, run_id)
 
 
 def resolve(run_id: str, decisions: dict[str, Any]) -> AdvanceResult:
-    """Supply the reviewer's decisions and carry on."""
+    """Supply the reviewer's decisions and carry on, still bounded."""
     graph = _graph()
-    result = graph.invoke(Command(resume=decisions), _config(run_id))
-    return _describe(graph, run_id, result)
+    _run_bounded(graph, run_id, Command(resume=decisions), _STEPS_PER_CALL)
+    return _describe(graph, run_id)
 
 
 def read_state(run_id: str) -> dict[str, Any] | None:
@@ -99,38 +137,32 @@ def read_state(run_id: str) -> dict[str, Any] | None:
     snapshot = _graph().get_state(_config(run_id))
     if not snapshot.values:
         return None
+    pending = _interrupts(snapshot)
     values: dict[str, Any] = dict(snapshot.values)
-    values["_paused"] = bool(snapshot.next)
-    values["_pending"] = tuple(
-        issue
-        for task in snapshot.tasks
-        for pending in task.interrupts
-        if isinstance(getattr(pending, "value", None), dict)
-        for issue in pending.value.get("issues", [])
-    )
+    # Paused means "a person is being asked", not merely "more work remains".
+    values["_paused"] = bool(pending)
+    values["_pending"] = pending
+    values["_runnable"] = bool(snapshot.next) and not pending
     return values
 
 
-def _describe(graph: Any, run_id: str, result: dict[str, Any]) -> AdvanceResult:
+def _describe(graph: Any, run_id: str) -> AdvanceResult:
+    """Read the committed checkpoint, rather than trusting the stream's output."""
     snapshot = graph.get_state(_config(run_id))
-    state = dict(snapshot.values) if snapshot.values else dict(result)
-    paused = bool(snapshot.next)
+    state = dict(snapshot.values) if snapshot.values else {}
+    pending = _interrupts(snapshot)
+    paused = bool(pending)
+
     phase = state.get("phase", RunPhase.INGESTED)
     if not isinstance(phase, RunPhase):
         phase = RunPhase(str(phase))
-    pending = _pending_from(result)
-    if paused and not pending:
-        pending = tuple(
-            issue
-            for task in snapshot.tasks
-            for interrupt in task.interrupts
-            if isinstance(getattr(interrupt, "value", None), dict)
-            for issue in interrupt.value.get("issues", [])
-        )
+
     return AdvanceResult(
         phase=phase,
         paused=paused,
         pending=pending,
+        # More work exists whenever the graph has a next task and nobody is being
+        # asked anything. A terminal phase with no next task is genuinely done.
+        runnable=bool(snapshot.next) and not paused,
         state=state,
-        runnable=_runnable(phase, paused, state),
     )

@@ -1,198 +1,127 @@
-"use client";
-
-import { useState } from "react";
-import { Button, ButtonLink } from "@/components/ui/button";
 import { Badge, type Tone } from "@/components/ui/status";
-import { RESULT_RECORDS, RESULT_SUMMARY, type RecordRow } from "@/lib/sample";
-import { cn } from "@/lib/utils";
-
-const STATE: Record<RecordRow["state"], { tone: Tone; label: string }> = {
-  sent: { tone: "ok", label: "Sent" },
-  failed: { tone: "problem", label: "Refused" },
-  skipped: { tone: "neutral", label: "Skipped" },
-  retrying: { tone: "attention", label: "Retrying" },
-  ready: { tone: "working", label: "Ready" },
-};
-
-type Filter = "all" | "sent" | "failed" | "skipped";
+import { Button } from "@/components/ui/button";
+import type { Run } from "@/lib/api";
+import { RECORD_STATE, reconcile, writeDate } from "@/lib/present";
 
 /**
- * What happened, once the migration is finished.
+ * What ended up where.
  *
- * The headline reconciles: source rows, duplicates combined, employees, and what
- * became of each one. Adding "12 rows" to "7 sent" would be mixing units, so the
- * arithmetic is spelled out instead.
+ * The headline reports the outcome in the units a person cares about, and the
+ * reconciliation sentence explains why row counts and employee counts differ
+ * instead of adding them together.
  */
-export function Results() {
-  const [filter, setFilter] = useState<Filter>("all");
-
-  const shown = RESULT_RECORDS.filter((record) => {
-    if (filter === "all") return true;
-    if (filter === "failed") return record.state === "failed";
-    if (filter === "skipped") return record.state === "skipped";
-    return record.state === "sent";
-  });
-
-  const failed = RESULT_RECORDS.filter((record) => record.state === "failed");
+export function Results({ run }: { run: Run }) {
+  const c = run.counters;
+  const failed = run.records.filter((r) => r.disposition === "failed");
 
   return (
-    <div className="space-y-6">
-      <section className="card p-5 sm:p-6">
-        <h2 className="font-display text-[20px] font-semibold">
-          {RESULT_SUMMARY.sent} of {RESULT_SUMMARY.employees} employees reached the Demo HR system
+    <div className="space-y-5">
+      <section className="panel px-5 py-5 sm:px-6">
+        <h2 className="font-display text-[20px]">
+          {c.delivered} of {c.records} employees reached the destination
         </h2>
-        <p className="mt-2 text-[14.5px] leading-relaxed text-ink-muted">
-          {RESULT_SUMMARY.sourceRows} rows across your files became{" "}
-          {RESULT_SUMMARY.employees} employees after combining {RESULT_SUMMARY.merged}{" "}
-          duplicate rows. {RESULT_SUMMARY.failed} was refused by the destination and{" "}
-          {RESULT_SUMMARY.skipped} you chose to skip. Took{" "}
-          {RESULT_SUMMARY.duration}.
-        </p>
+        <p className="mt-1.5 text-[14px] text-ink-muted">{reconcile(c)}</p>
 
-        <div className="mt-5 flex flex-wrap gap-2">
-          <Count label="Sent" value={RESULT_SUMMARY.sent} tone="ok" onClick={() => setFilter("sent")} />
-          <Count label="Refused" value={RESULT_SUMMARY.failed} tone="problem" onClick={() => setFilter("failed")} />
-          <Count label="Skipped" value={RESULT_SUMMARY.skipped} tone="neutral" onClick={() => setFilter("skipped")} />
-          <Count label="Values cleaned" value={RESULT_SUMMARY.cleaned} tone="neutral" />
-        </div>
+        <dl className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <Tally label="Sent" value={c.delivered} tone="ok" />
+          <Tally label="Rejected" value={c.failed} tone={c.failed > 0 ? "problem" : "neutral"} />
+          <Tally label="Left out" value={c.excluded} tone="neutral" />
+          <Tally label="Retrying" value={c.retrying} tone={c.retrying > 0 ? "working" : "neutral"} />
+        </dl>
       </section>
 
       {failed.length > 0 && (
-        <section className="rounded-lg border border-problem/30 bg-problem-soft p-5">
-          <h3 className="text-[15.5px] font-semibold text-problem">
-            {failed.length} record was not accepted
-          </h3>
-          {failed.map((record) => (
-            <div key={record.employeeId} className="mt-2.5">
-              <p className="text-[14px] font-medium">
-                {record.name} · <span className="raw">{record.employeeId}</span>
-              </p>
-              {/* The destination's own reason, not a validation error from our side. */}
-              <p className="mt-1 max-w-prose text-[13.5px] leading-relaxed text-ink-muted">
-                {record.note}
-              </p>
-            </div>
-          ))}
-          <div className="mt-4 flex flex-wrap gap-2">
-            <Button size="sm" variant="secondary">
-              Try sending this again
-            </Button>
-            <Button size="sm" variant="quiet">
-              Download the refused record
-            </Button>
+        <section className="panel overflow-hidden">
+          <div className="border-b border-line bg-problem-soft px-5 py-3">
+            <h3 className="text-[14px] font-semibold text-problem">
+              {failed.length === 1 ? "One record needs attention" : `${failed.length} records need attention`}
+            </h3>
+            <p className="mt-0.5 text-[13px] text-ink-muted">
+              The destination refused these. Its own reason is shown.
+            </p>
           </div>
-          <p className="mt-2.5 text-[13px] text-ink-muted">
-            Retrying only re-sends what failed. Records already accepted are never
-            sent twice.
-          </p>
+          <ul className="divide-y divide-line">
+            {failed.map((record) => (
+              <li key={record.id} className="px-5 py-3.5">
+                <p className="text-[14px] font-medium">
+                  {record.values.fullName ?? record.id}
+                  {record.employee_id && (
+                    <span className="ml-2 raw text-[12.5px] font-normal text-ink-muted">
+                      {record.employee_id}
+                    </span>
+                  )}
+                </p>
+                {record.errors.map((message) => (
+                  <p key={message} className="mt-1 text-[13px] text-problem">
+                    {message}
+                  </p>
+                ))}
+                <p className="mt-1 text-[12.5px] text-ink-subtle">From {record.sources.join(", ")}</p>
+              </li>
+            ))}
+          </ul>
         </section>
       )}
 
-      <section>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <h3 className="text-[15.5px] font-semibold">Every employee</h3>
-          <div className="flex gap-1 rounded-md border border-line bg-surface p-0.5">
-            {(["all", "sent", "failed", "skipped"] as Filter[]).map((option) => (
-              <button
-                key={option}
-                onClick={() => setFilter(option)}
-                aria-pressed={filter === option}
-                className={cn(
-                  "rounded px-2.5 py-1 text-[13px] font-medium capitalize transition-colors",
-                  filter === option ? "bg-accent-soft text-accent-ink" : "text-ink-muted hover:text-ink",
-                )}
-              >
-                {option === "failed" ? "refused" : option}
-              </button>
-            ))}
-          </div>
+      <section className="panel overflow-hidden">
+        <div className="flex flex-wrap items-center gap-3 border-b border-line px-5 py-3">
+          <h3 className="text-[14px] font-semibold">Every employee</h3>
+          <Button size="sm" className="ml-auto" disabled>
+            Download cleaned data
+          </Button>
         </div>
 
-        {/* Only the table scrolls sideways on a phone, never the page. */}
-        <div className="mt-3 overflow-x-auto rounded-lg border border-line">
-          <table className="w-full border-collapse bg-surface text-left text-[13.5px]">
+        {/* Only the table scrolls sideways, and it says so to a screen reader. */}
+        <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Migrated employees">
+          <table className="w-full min-w-[46rem] border-collapse text-left">
             <thead>
-              <tr className="border-b border-line text-[12.5px] text-ink-muted">
+              <tr className="border-b border-line text-[12px] text-ink-subtle">
                 <Th>Employee</Th>
+                <Th>ID</Th>
+                <Th>Work email</Th>
                 <Th>Start date</Th>
                 <Th>Result</Th>
-                <Th>From</Th>
               </tr>
             </thead>
             <tbody>
-              {shown.map((record) => (
-                <tr key={record.employeeId} className="border-b border-line/70 align-top last:border-0">
-                  <td className="px-3 py-2.5">
-                    <p className="font-medium">{record.name}</p>
-                    <p className="raw text-[12.5px] text-ink-muted">{record.employeeId}</p>
-                  </td>
-                  <td className="px-3 py-2.5 whitespace-nowrap">{record.startDate}</td>
-                  <td className="px-3 py-2.5">
-                    <Badge tone={STATE[record.state].tone}>{STATE[record.state].label}</Badge>
-                    {record.note && (
-                      <p className="mt-1 max-w-[34ch] text-[12.5px] leading-snug text-ink-muted">
-                        {record.note}
-                      </p>
-                    )}
-                  </td>
-                  <td className="px-3 py-2.5 text-[12.5px] text-ink-muted">
-                    {record.from.map((source) => (
-                      <span key={source} className="block whitespace-nowrap">
-                        {source}
-                      </span>
-                    ))}
-                  </td>
-                </tr>
-              ))}
+              {run.records.map((record) => {
+                const state = RECORD_STATE[record.disposition];
+                const start = record.values.startDate;
+                return (
+                  <tr key={record.id} className="border-b border-line last:border-0">
+                    <Td>{record.values.fullName ?? "—"}</Td>
+                    <Td className="raw">{record.employee_id ?? "—"}</Td>
+                    <Td className="raw">{record.values.workEmail ?? "—"}</Td>
+                    <Td>{start ? writeDate(start) : "—"}</Td>
+                    <Td>
+                      <Badge tone={state.tone}>{state.label}</Badge>
+                    </Td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       </section>
-
-      <div className="flex flex-wrap gap-2.5 border-t border-line pt-5">
-        <Button variant="secondary">Download the migrated employees</Button>
-        <Button variant="quiet">Download skipped and refused</Button>
-        <Button variant="quiet">View every change</Button>
-        <ButtonLink href="/app/new" variant="primary" className="ml-auto">
-          Start another migration
-        </ButtonLink>
-      </div>
     </div>
   );
 }
 
-function Count({
-  label,
-  value,
-  tone,
-  onClick,
-}: {
-  label: string;
-  value: number;
-  tone: Tone;
-  onClick?: () => void;
-}) {
-  const content = (
-    <>
-      <span className="text-[19px] font-semibold tabular-nums">{value}</span>
-      <span className="text-[13px] text-ink-muted">{label}</span>
-    </>
-  );
-  const base = cn(
-    "flex items-baseline gap-2 rounded-md border px-3 py-2",
-    tone === "ok" && "border-ok/25 bg-ok-soft",
-    tone === "problem" && "border-problem/25 bg-problem-soft",
-    tone === "neutral" && "border-line bg-sunken",
-  );
-  return onClick ? (
-    <button onClick={onClick} className={cn(base, "transition-colors hover:border-line-strong")}>
-      {content}
-    </button>
-  ) : (
-    <div className={base}>{content}</div>
+function Tally({ label, value, tone }: { label: string; value: number; tone: Tone }) {
+  const colour =
+    tone === "ok" ? "text-ok" : tone === "problem" ? "text-problem" : tone === "working" ? "text-accent" : "text-ink";
+  return (
+    <div className="rounded-md bg-sunken px-3.5 py-3">
+      <dt className="text-[12.5px] text-ink-muted">{label}</dt>
+      <dd className={`mt-0.5 font-display text-[22px] tnum ${colour}`}>{value}</dd>
+    </div>
   );
 }
 
 function Th({ children }: { children: React.ReactNode }) {
-  return <th scope="col" className="px-3 py-2 font-medium whitespace-nowrap">{children}</th>;
+  return <th scope="col" className="px-5 py-2.5 font-medium">{children}</th>;
+}
+
+function Td({ children, className = "" }: { children: React.ReactNode; className?: string }) {
+  return <td className={`px-5 py-3 text-[13.5px] ${className}`}>{children}</td>;
 }

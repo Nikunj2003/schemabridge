@@ -1,51 +1,66 @@
-import { UsageSummary } from "@/components/app/shell";
-import { USAGE } from "@/lib/sample";
+import { AllowanceMeter } from "@/components/app/shell";
+import { ACCOUNT, USAGE } from "@/lib/account";
 
+/** What has been used, what is kept, and for how long. */
 export default function UsagePage() {
   return (
-    <div className="mx-auto max-w-2xl px-5 py-8 sm:px-8 sm:py-10">
-      <h1 className="font-display text-[26px] font-semibold">Usage &amp; data</h1>
+    <div className="mx-auto max-w-[52rem] px-4 py-6 sm:px-8 sm:py-8">
+      <h1 className="font-display text-[24px]">Usage &amp; data</h1>
+      <p className="mt-1.5 text-[14px] text-ink-muted">
+        Limits exist so one person cannot exhaust the shared model allowance.
+      </p>
 
-      <div className="mt-6 space-y-6">
-        <div className="md:hidden">
-          <UsageSummary />
-        </div>
-
-        <section className="card p-5">
-          <h2 className="text-[15.5px] font-semibold">Your allowance today</h2>
-          <dl className="mt-3 space-y-2 text-[14px]">
-            <Row label="Migrations started" value={`${USAGE.runsUsed} of ${USAGE.runsLimit}`} />
-            <Row label="AI questions asked" value={`${USAGE.aiUsed} of ${USAGE.aiLimit}`} />
-            <Row label="Resets" value="12:00 AM IST" />
-          </dl>
-          <p className="mt-3 text-[13px] leading-relaxed text-ink-muted">
-            Reviewing, answering questions and retrying a delivery on a migration
-            you already started do not count against your migrations.
+      <div className="mt-6 grid gap-4 sm:grid-cols-2">
+        <section className="panel px-5 py-4">
+          <h2 className="text-[14px] font-semibold">Migrations today</h2>
+          <p className="mt-1 font-display text-[28px] tnum">
+            {USAGE.runsUsed}
+            <span className="text-[16px] text-ink-muted"> of {USAGE.runsLimit}</span>
           </p>
+          <div className="mt-3">
+            <AllowanceMeter used={USAGE.runsUsed} limit={USAGE.runsLimit} />
+          </div>
         </section>
 
-        <section className="card p-5">
-          <h2 className="text-[15.5px] font-semibold">Your data</h2>
-          <p className="mt-2 text-[14px] leading-relaxed text-ink-muted">
-            Uploaded files and everything derived from them are kept for 48 hours
-            so you can come back to a migration, then deleted. You can remove a
-            migration sooner from its own page.
+        <section className="panel px-5 py-4">
+          <h2 className="text-[14px] font-semibold">Model requests today</h2>
+          <p className="mt-1 font-display text-[28px] tnum">
+            {USAGE.callsUsed}
+            <span className="text-[16px] text-ink-muted"> of {USAGE.callsLimit}</span>
           </p>
-          <p className="mt-2 text-[14px] leading-relaxed text-ink-muted">
-            This is a demonstration on made-up data, and records go to a simulated
-            HR system. Please do not upload anyone&rsquo;s real details.
+          <p className="mt-3 text-[13px] text-ink-muted">
+            Only unfamiliar columns cost a request. Most migrations use one or
+            two; a migration never uses more than three.
           </p>
         </section>
       </div>
-    </div>
-  );
-}
 
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex justify-between gap-4 border-b border-line pb-2 last:border-0">
-      <dt className="text-ink-muted">{label}</dt>
-      <dd className="font-medium">{value}</dd>
+      <section className="panel mt-4 px-5 py-4">
+        <h2 className="text-[14px] font-semibold">Your account</h2>
+        <dl className="mt-3 space-y-2 text-[13.5px]">
+          <div className="flex gap-3">
+            <dt className="w-28 shrink-0 text-ink-muted">Signed in as</dt>
+            <dd>{ACCOUNT.email}</dd>
+          </div>
+          <div className="flex gap-3">
+            <dt className="w-28 shrink-0 text-ink-muted">Sign-in</dt>
+            <dd>Google</dd>
+          </div>
+          <div className="flex gap-3">
+            <dt className="w-28 shrink-0 text-ink-muted">Resets</dt>
+            <dd>12:00 AM IST daily</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section className="panel mt-4 px-5 py-4">
+        <h2 className="text-[14px] font-semibold">What is stored</h2>
+        <p className="mt-2 max-w-[62ch] text-[13.5px] text-ink-muted">
+          The files you upload, the records built from them and the decisions you
+          made are kept for 48 hours so you can reopen a migration, then deleted.
+          Use synthetic data only — do not upload real personal information.
+        </p>
+      </section>
     </div>
   );
 }

@@ -62,6 +62,11 @@ export interface Issue {
   field_label: string | null;
   current_value: string | null;
   affected: number;
+  /** Which records this issue is about, so the UI can name the employee. */
+  record_ids: string[];
+  /** The source column's own header, for issues raised about a column. */
+  column: string | null;
+  column_file: string | null;
   options: IssueOption[];
   errors: string[];
   resolution: Resolution | null;

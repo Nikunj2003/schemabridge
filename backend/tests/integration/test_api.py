@@ -86,6 +86,49 @@ def upload(client: httpx.Client, *names: str) -> Any:
     return client.post("/api/runs", files=files)
 
 
+#: Upper bound on advance calls in a test. Execution is bounded per request, so a
+#: run needs several; a fixed ceiling keeps a stuck run from hanging the suite.
+_MAX_ADVANCES = 40
+
+
+def drive(client: httpx.Client, run: Any) -> Any:
+    """Advance a run until it finishes or stops to ask a person something.
+
+    The API executes a bounded number of graph supersteps per request, so that
+    creating a run returns before any work has happened and progress is
+    observable while it does. Every caller therefore has to drive the run, which
+    is exactly what the browser does.
+    """
+    run_id = run["run_id"]
+    for _ in range(_MAX_ADVANCES):
+        if run["paused"] or not run["runnable"]:
+            return run
+        response = client.post(f"/api/runs/{run_id}/advance")
+        assert response.status_code == 200, response.text
+        run = response.json()
+    raise AssertionError(f"run {run_id} did not settle within {_MAX_ADVANCES} advances")
+
+
+def start(client: httpx.Client, *names: str) -> Any:
+    """Upload and run until something needs a person, or it is done."""
+    response = upload(client, *names)
+    assert response.status_code == 201, response.text
+    return drive(client, response.json())
+
+
+def _any_decision(issue: Any) -> dict[str, Any]:
+    """A decision that moves an issue forward, preferring a concrete value."""
+    concrete = next(
+        (o for o in issue["options"] if o.get("value") or o.get("target")), None
+    )
+    if concrete:
+        return {"action": "approve", "option_id": concrete["id"], "value": concrete.get("value")}
+    excluding = next((o for o in issue["options"] if o["id"].startswith("exclude:")), None)
+    if excluding:
+        return {"action": "exclude", "option_id": excluding["id"], "note": "Cannot be migrated."}
+    return {"action": "approve", "option_id": issue["options"][0]["id"]}
+
+
 class TestSchemaEndpoint:
     def test_publishes_the_target_contract(self, client: httpx.Client) -> None:
         body = client.get("/api/schema").json()
@@ -95,11 +138,55 @@ class TestSchemaEndpoint:
         assert body["limits"]["max_files"] >= 1
 
 
-class TestCleanRun:
-    def test_a_clean_file_completes_without_asking(self, client: httpx.Client) -> None:
+class TestAcceptance:
+    def test_creating_a_run_returns_before_the_work_is_done(
+        self, client: httpx.Client
+    ) -> None:
+        """The upload is accepted; nothing is migrated yet.
+
+        Doing the whole migration inside the create request is what made the run
+        screen open on an already-finished run, with no way to watch the agent
+        work. The response must arrive with the sources parsed and no more.
+        """
         response = upload(client, "employees-clean.csv")
         assert response.status_code == 201, response.text
         run = response.json()
+
+        assert run["run_id"]
+        assert run["counters"]["source_rows"] == 3
+        # Accepted, not processed: no mapping, no delivery, and nobody asked.
+        assert run["phase"] == "ingested"
+        assert not run["paused"]
+        assert run["counters"]["delivered"] == 0
+        assert run["counters"]["auto_mapped"] == 0
+        # There is work left, and the caller is told so.
+        assert run["runnable"]
+
+    def test_work_becomes_visible_before_the_run_finishes(
+        self, client: httpx.Client
+    ) -> None:
+        """Progress is observable part-way through, not only at the end."""
+        created = upload(client, "employees-clean.csv").json()
+        run_id = created["run_id"]
+
+        # One bounded step, then look. Something has happened, and it is not over.
+        after_one = client.post(f"/api/runs/{run_id}/advance").json()
+        assert after_one["events"], "no committed events after the first step"
+        assert after_one["phase"] != "ingested"
+
+        # A plain read sees the same committed state without advancing anything.
+        observed = client.get(f"/api/runs/{run_id}").json()
+        assert observed["phase"] == after_one["phase"]
+        assert observed["counters"] == after_one["counters"]
+
+        # And driving on reaches the end.
+        final = drive(client, after_one)
+        assert final["phase"] in {"complete", "complete_with_failures"}
+
+
+class TestCleanRun:
+    def test_a_clean_file_completes_without_asking(self, client: httpx.Client) -> None:
+        run = start(client, "employees-clean.csv")
 
         # No human input needed, and delivery happened on its own.
         assert not run["paused"]
@@ -109,7 +196,7 @@ class TestCleanRun:
         assert run["counters"]["escalated"] == 0
 
     def test_the_activity_feed_explains_what_happened(self, client: httpx.Client) -> None:
-        run = upload(client, "employees-clean.csv").json()
+        run = start(client, "employees-clean.csv")
         actions = {event["action"] for event in run["events"]}
         assert "mapping_applied" in actions
         assert "records_reconciled" in actions
@@ -120,7 +207,7 @@ class TestCleanRun:
 
 class TestMessyRun:
     def test_it_pauses_with_actionable_escalations(self, client: httpx.Client) -> None:
-        run = upload(client, "employees-legacy.csv", "employees-hr-export.csv").json()
+        run = start(client, "employees-legacy.csv", "employees-hr-export.csv")
 
         assert run["paused"]
         blocking = [i for i in run["issues"] if i["blocking"] and i["status"] == "open"]
@@ -131,14 +218,14 @@ class TestMessyRun:
             assert issue["options"]
 
     def test_automatic_work_outnumbers_escalations(self, client: httpx.Client) -> None:
-        run = upload(client, "employees-legacy.csv", "employees-hr-export.csv").json()
+        run = start(client, "employees-legacy.csv", "employees-hr-export.csv")
         counters = run["counters"]
         assert counters["auto_mapped"] > counters["escalated"]
         # Safe fixes were applied without asking.
         assert counters["repairs"] > 0
 
     def test_resolving_the_queue_finishes_the_run(self, client: httpx.Client) -> None:
-        created = upload(client, "employees-legacy.csv", "employees-hr-export.csv").json()
+        created = start(client, "employees-legacy.csv", "employees-hr-export.csv")
         run_id = created["run_id"]
 
         decisions: dict[str, Any] = {}
@@ -160,21 +247,26 @@ class TestMessyRun:
                     "note": "Cannot be migrated as supplied.",
                 }
 
+        # Decisions can arrive one at a time or together; either way the run
+        # then has to be driven on, and may stop again for something new.
         resolved = client.post(f"/api/runs/{run_id}/resolve", json=decisions)
         assert resolved.status_code == 200, resolved.text
-        final = resolved.json()
+        final = drive(client, resolved.json())
 
-        assert not final["paused"]
+        # Anything still open is a question the earlier decisions uncovered.
+        while final["paused"]:
+            remaining = {
+                issue["id"]: _any_decision(issue)
+                for issue in final["issues"]
+                if issue["blocking"] and issue["status"] == "open"
+            }
+            assert remaining, "paused with nothing open to answer"
+            final = drive(
+                client, client.post(f"/api/runs/{run_id}/resolve", json=remaining).json()
+            )
+
         assert final["counters"]["awaiting_review"] == 0
-
-        # One fixture record fails its first delivery on purpose, so the run is
-        # not finished until the scheduled retry has been driven — which is what
-        # the UI's advance loop does.
-        for _ in range(4):
-            if final["phase"] in {"complete", "complete_with_failures"}:
-                break
-            final = client.post(f"/api/runs/{run_id}/advance").json()
-
+        assert final["phase"] in {"complete", "complete_with_failures"}
         assert final["counters"]["delivered"] > 0
         # Every record reaches a terminal state, and nothing vanishes silently.
         counters = final["counters"]
@@ -183,7 +275,7 @@ class TestMessyRun:
         assert accounted == counters["records"]
 
     def test_the_decision_is_attributed_to_the_reviewer(self, client: httpx.Client) -> None:
-        created = upload(client, "employees-legacy.csv", "employees-hr-export.csv").json()
+        created = start(client, "employees-legacy.csv", "employees-hr-export.csv")
         run_id = created["run_id"]
         issue = next(i for i in created["issues"] if i["blocking"] and i["options"])
         option = next((o for o in issue["options"] if o.get("target") or o.get("value")), None)
@@ -206,10 +298,10 @@ class TestDeliveryOutcomes:
         self, client: httpx.Client
     ) -> None:
         """The legacy fixture contains one record that fails once and one rejected."""
-        created = upload(client, "employees-legacy.csv").json()
+        created = start(client, "employees-legacy.csv")
         run_id = created["run_id"]
 
-        if created["paused"]:
+        while created["paused"]:
             decisions = {}
             for issue in created["issues"]:
                 if not (issue["blocking"] and issue["status"] == "open"):
@@ -225,13 +317,9 @@ class TestDeliveryOutcomes:
                     if concrete
                     else {"action": "exclude", "option_id": excluding["id"] if excluding else None}
                 )
-            created = client.post(f"/api/runs/{run_id}/resolve", json=decisions).json()
-
-        # Drive any scheduled retries to completion.
-        for _ in range(4):
-            if not created["runnable"] and created["phase"] != "delivering":
-                break
-            created = client.post(f"/api/runs/{run_id}/advance").json()
+            created = drive(
+                client, client.post(f"/api/runs/{run_id}/resolve", json=decisions).json()
+            )
 
         actions = [e["action"] for e in created["events"]]
         assert "delivery_attempted" in actions
@@ -257,7 +345,7 @@ class TestOwnership:
         assert response.status_code == 404
 
     def test_another_visitor_cannot_resolve_a_run(self, client: httpx.Client, origin: str) -> None:
-        created = upload(client, "employees-legacy.csv", "employees-hr-export.csv").json()
+        created = start(client, "employees-legacy.csv", "employees-hr-export.csv")
         run_id = created["run_id"]
         issue_id = created["issues"][0]["id"]
 
@@ -321,7 +409,7 @@ class TestPollingIsSafe:
         assert len(first["issues"]) == len(second["issues"])
 
     def test_events_can_be_fetched_incrementally(self, client: httpx.Client) -> None:
-        created = upload(client, "employees-clean.csv").json()
+        created = start(client, "employees-clean.csv")
         run_id = created["run_id"]
 
         everything = client.get(f"/api/runs/{run_id}").json()

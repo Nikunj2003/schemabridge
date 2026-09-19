@@ -84,6 +84,13 @@ class IssueView(BaseModel):
     field_label: str | None
     current_value: str | None
     affected: int
+    #: Which records this issue is about. The UI needs these to name the employee
+    #: rather than matching on values, which is ambiguous when two people share
+    #: a value and wrong when the issue is about a column rather than a record.
+    record_ids: list[str]
+    #: The source column's own header, for issues raised about a column.
+    column: str | None
+    column_file: str | None
     options: list[dict[str, Any]]
     errors: list[str]
     resolution: dict[str, Any] | None
@@ -172,29 +179,54 @@ def _mapping_views(state: dict[str, Any]) -> list[MappingView]:
     return list(deduped.values())
 
 
+def _last_delivery_detail(intent: Any) -> str | None:
+    """Why the destination refused a record, in the destination's own words.
+
+    Validation errors explain a record that never left; they say nothing about
+    one the target rejected. Reading them for a failed delivery is how a failure
+    ends up displayed with no reason at all.
+    """
+    attempts = _attr(intent, "attempts", ()) or ()
+    for attempt in reversed(list(attempts)):
+        detail = _attr(attempt, "detail", "")
+        if detail:
+            status = _attr(attempt, "status")
+            return f"{detail} (HTTP {status})" if status else str(detail)
+    return None
+
+
 def _record_views(
     records: tuple[CanonicalRecord, ...], deliveries: tuple[DeliveryIntent, ...]
 ) -> list[RecordView]:
     targets = {_attr(intent, "record_id"): _attr(intent, "target_id") for intent in deliveries}
+    refusals = {
+        _attr(intent, "record_id"): _last_delivery_detail(intent) for intent in deliveries
+    }
     views: list[RecordView] = []
     for record in records:
         validation = _attr(record, "validation", ()) or ()
         last = validation[-1] if validation else None
         values = dict(_attr(record, "values", {}) or {})
         errors = _attr(last, "errors", ()) if last is not None else ()
+        disposition = _enum_value(_attr(record, "disposition"), "candidate")
+        messages = [_attr(error, "message", "") for error in errors or ()]
+        if disposition == Disposition.FAILED.value:
+            # The destination's reason, not a stale validation message.
+            refusal = refusals.get(_attr(record, "id"))
+            messages = [refusal] if refusal else ["The destination refused this record."]
         views.append(
             RecordView(
                 id=_attr(record, "id", ""),
                 employee_id=values.get("employeeId"),
                 values=values,
-                disposition=_enum_value(_attr(record, "disposition"), "candidate"),
+                disposition=disposition,
                 sources=[
                     f"{_attr(p, 'file_name', '')} row {_attr(p, 'row', '?')}"
                     for p in _attr(record, "provenance", ()) or ()
                 ],
                 repairs=len(_attr(record, "repairs", ()) or ()),
                 valid=bool(last is not None and _attr(last, "valid", False)),
-                errors=[_attr(error, "message", "") for error in errors or ()],
+                errors=messages,
                 exclusion_reason=_attr(record, "exclusion_reason"),
                 target_id=targets.get(_attr(record, "id")),
             )
@@ -202,10 +234,14 @@ def _record_views(
     return views
 
 
-def _issue_views(issues: tuple[ReviewIssue, ...]) -> list[IssueView]:
+def _issue_views(
+    issues: tuple[ReviewIssue, ...], columns: tuple[Any, ...] = ()
+) -> list[IssueView]:
+    by_id = {_attr(column, "id"): column for column in columns}
     views: list[IssueView] = []
     for issue in issues:
         field_name = _attr(issue, "field_name")
+        column = by_id.get(_attr(issue, "column_id"))
         spec = get_field(field_name) if field_name else None
         resolution = _attr(issue, "resolution")
         resolved_at: Any = _attr(resolution, "resolved_at") if resolution else None
@@ -220,6 +256,9 @@ def _issue_views(issues: tuple[ReviewIssue, ...]) -> list[IssueView]:
                 field_label=spec.label if spec else None,
                 current_value=_attr(issue, "current_value"),
                 affected=len(_attr(issue, "record_ids", ()) or ()),
+                record_ids=list(_attr(issue, "record_ids", ()) or ()),
+                column=_attr(column, "header") if column is not None else None,
+                column_file=_attr(column, "file_name") if column is not None else None,
                 options=[
                     {
                         "id": _attr(option, "id", ""),
@@ -262,18 +301,35 @@ def _counters(state: dict[str, Any]) -> CountersView:
     def disposition_is(record: Any, wanted: Disposition) -> bool:
         return _enum_value(_attr(record, "disposition")) == wanted.value
 
+    # One column can accumulate several decisions as it is corrected. Only the
+    # latest one is the current state; counting them all reports a column total
+    # that grows while the reviewer works.
+    effective: dict[str, Any] = {}
+    for decision in mappings:
+        column_id = _attr(decision, "column_id")
+        if column_id is not None:
+            effective[column_id] = decision
+    current = tuple(effective.values())
+
+    # Rows minus records is only the duplicate count once the records exist.
+    # Before reconciliation runs there are none, and the difference is the whole
+    # dataset — which surfaced as "combined 3 duplicate rows" on a clean file
+    # that had no duplicates at all.
+    rows = len(state.get("rows", ()))
+    merged = max(0, rows - len(records)) if records else 0
+
     return CountersView(
-        source_rows=len(state.get("rows", ())),
+        source_rows=rows,
         records=len(records),
-        merged=max(0, len(state.get("rows", ())) - len(records)),
+        merged=merged,
         auto_mapped=sum(
             1
-            for m in mappings
+            for m in current
             if _enum_value(_attr(m, "outcome")) == MappingOutcome.AUTO_MAPPED.value
         ),
         escalated=sum(
             1
-            for m in mappings
+            for m in current
             if _enum_value(_attr(m, "outcome")) == MappingOutcome.ESCALATED.value
         ),
         repairs=sum(len(_attr(record, "repairs", ()) or ()) for record in records),
@@ -337,7 +393,7 @@ def build_run_view(
         files=[_attr(source, "name", "") for source in state.get("files", ())],
         counters=_counters(state),
         mappings=_mapping_views(state),
-        issues=_issue_views(state.get("issues", ())),
+        issues=_issue_views(state.get("issues", ()), tuple(state.get("columns", ()))),
         records=_record_views(state.get("records", ()), state.get("deliveries", ())),
         events=_event_views(events, since),
         latest_seq=max((int(_attr(event, "seq", 0)) for event in events), default=0),

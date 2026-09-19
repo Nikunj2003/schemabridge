@@ -245,7 +245,10 @@ def read_run(run_id: str, request: Request, since: int = 0) -> RunView:
         run_id,
         state,
         paused=bool(state.get("_paused")),
-        runnable=not state.get("_paused"),
+        # From the checkpoint, not inferred from `paused`: a finished run is
+        # neither paused nor runnable, and deriving one from the other would have
+        # the browser's advance loop calling forever after the run ended.
+        runnable=bool(state.get("_runnable")),
         since=since,
     )
 

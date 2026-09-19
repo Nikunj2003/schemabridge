@@ -7,8 +7,7 @@ type Variant = "primary" | "secondary" | "quiet" | "danger";
 type Size = "sm" | "md" | "lg";
 
 const VARIANT: Record<Variant, string> = {
-  primary:
-    "bg-accent text-white hover:bg-accent-hover shadow-[0_1px_2px_rgb(23_38_37/0.12)]",
+  primary: "bg-accent text-white hover:bg-accent-hover",
   secondary: "border border-line-strong bg-surface text-ink hover:bg-sunken",
   quiet: "text-ink-muted hover:bg-sunken hover:text-ink",
   danger: "border border-problem/35 bg-problem-soft text-problem hover:border-problem/60",
@@ -16,8 +15,8 @@ const VARIANT: Record<Variant, string> = {
 
 const SIZE: Record<Size, string> = {
   sm: "h-8 gap-1.5 rounded-md px-2.5 text-[13px]",
-  md: "h-10 gap-2 rounded-md px-4 text-[14px]",
-  lg: "h-12 gap-2 rounded-lg px-6 text-[15px]",
+  md: "h-9.5 gap-2 rounded-md px-3.5 text-[14px]",
+  lg: "h-11 gap-2 rounded-md px-5 text-[15px]",
 };
 
 const BASE =
@@ -38,15 +37,16 @@ export function ButtonLink({
   size = "md",
   className,
   children,
+  ...rest
 }: {
   href: string;
   variant?: Variant;
   size?: Size;
   className?: string;
   children: React.ReactNode;
-}) {
+} & Omit<React.ComponentProps<typeof Link>, "href" | "className" | "children">) {
   return (
-    <Link href={href} className={cn(BASE, VARIANT[variant], SIZE[size], className)}>
+    <Link href={href} className={cn(BASE, VARIANT[variant], SIZE[size], className)} {...rest}>
       {children}
     </Link>
   );

@@ -7,12 +7,41 @@ would never be reached.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from schemabridge import __version__
 from schemabridge.api.mock_target import router as mock_target_router
+from schemabridge.api.runs import router as runs_router
 from schemabridge.server.config import get_settings
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Create indexes once per cold start rather than per request.
+
+    Index creation is idempotent, so this is safe to repeat; a failure here must
+    not stop the application, since the health endpoint is what diagnoses a
+    misconfigured deployment.
+    """
+    if get_settings().has_database:
+        try:
+            from schemabridge.server import budget, receipts, runs
+
+            runs.ensure_indexes()
+            receipts.ensure_indexes()
+            budget.ensure_indexes()
+        except Exception:
+            logger.warning("could not create indexes at startup", exc_info=False)
+    yield
+
+
+logger = logging.getLogger(__name__)
+
 
 app = FastAPI(
     title="SchemaBridge API",
@@ -27,9 +56,11 @@ app = FastAPI(
     # the frontend instead — they would 404. Redoc is not needed at all.
     swagger_ui_oauth2_redirect_url="/api/docs/oauth2-redirect",
     redoc_url=None,
+    lifespan=lifespan,
 )
 
 
+app.include_router(runs_router)
 app.include_router(mock_target_router)
 
 

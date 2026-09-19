@@ -14,7 +14,7 @@ from typing import Literal
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from schemabridge.domain.models import IssueStatus
+from schemabridge.domain.models import DeliveryState, IssueStatus
 from schemabridge.graph.nodes import (
     apply_resolutions,
     assist_with_model,
@@ -35,6 +35,24 @@ def route_after_validation(
         issue.blocking and issue.status is IssueStatus.OPEN for issue in state.get("issues", ())
     )
     return "await_review" if blocking else "deliver"
+
+
+def route_after_delivery(state: MigrationState) -> Literal["deliver", "__end__"]:
+    """Keep going while a retry is outstanding.
+
+    A transient failure schedules another attempt, and the run is not finished
+    until that has happened. Ending here would leave the record permanently
+    undelivered with nothing prompting anyone to notice — the failure would look
+    like completion.
+
+    The retry budget is enforced per record in the delivery node, so this cannot
+    spin: once every record has either succeeded, failed for good, or exhausted
+    its attempts, nothing is left in `RETRY_WAIT` and the run ends.
+    """
+    waiting = any(
+        intent.state is DeliveryState.RETRY_WAIT for intent in state.get("deliveries", ())
+    )
+    return "deliver" if waiting else "__end__"
 
 
 def route_after_review(
@@ -69,7 +87,14 @@ def build_graph() -> StateGraph[MigrationState, None, MigrationState, MigrationS
     # A correction changes the mapping, so the affected rows are reconciled and
     # revalidated rather than trusted as-is.
     graph.add_edge("apply_resolutions", "reconcile")
-    graph.add_edge("deliver", END)
+    graph.add_conditional_edges(
+        "deliver",
+        route_after_delivery,
+        {
+            "deliver": "deliver",
+            "__end__": END,
+        },
+    )
 
     return graph
 

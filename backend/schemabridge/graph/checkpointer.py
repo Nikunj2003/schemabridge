@@ -14,18 +14,52 @@ from typing import Any
 from langgraph.checkpoint.mongodb import MongoDBSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
+from schemabridge.domain import models, target
 from schemabridge.server.config import get_settings
 from schemabridge.server.mongo import get_client
 
 _CHECKPOINT_DB_SUFFIX = "_checkpoints"
 
-#: Modules whose types appear inside checkpointed state — the domain models and
-#: the enums they reference. The serializer warns on unregistered types today and
-#: will refuse them in a later version, so they are declared explicitly rather
-#: than relying on a default that is going away.
-_ALLOWED_MODULES: tuple[tuple[str, str], ...] = (
-    ("schemabridge.domain.models", "*"),
-    ("schemabridge.domain.target", "*"),
+#: Every domain type that can appear inside checkpointed state.
+#:
+#: The serializer matches an exact (module, name) pair — there is no wildcard —
+#: and a type it does not recognise comes back as a plain dict rather than the
+#: model it was written as. Listing the classes themselves means the allowlist
+#: cannot drift out of step with a rename, since an unknown name would not
+#: import.
+_ALLOWED_TYPES: tuple[type, ...] = (
+    models.Actor,
+    models.AppliedRepair,
+    models.AuditEvent,
+    models.CanonicalRecord,
+    models.ColumnProfile,
+    models.DeliveryAttempt,
+    models.DeliveryIntent,
+    models.DeliveryOutcome,
+    models.DeliveryState,
+    models.Disposition,
+    models.IssueOption,
+    models.IssueResolution,
+    models.IssueStatus,
+    models.IssueType,
+    models.MappingBasis,
+    models.MappingCandidate,
+    models.MappingDecision,
+    models.MappingOutcome,
+    models.Provenance,
+    models.ResolutionAction,
+    models.ReviewIssue,
+    models.RunCounters,
+    models.RunPhase,
+    models.SourceColumn,
+    models.SourceFile,
+    models.SourceKind,
+    models.SourceRow,
+    models.ValidationError,
+    models.ValidationPass,
+    models.ValidationPassLabel,
+    target.TargetField,
+    target.ValueKind,
 )
 
 
@@ -38,7 +72,7 @@ def build_serializer() -> JsonPlusSerializer:
     """
     return JsonPlusSerializer(
         pickle_fallback=False,
-        allowed_msgpack_modules=_ALLOWED_MODULES,
+        allowed_msgpack_modules=_ALLOWED_TYPES,
     )
 
 

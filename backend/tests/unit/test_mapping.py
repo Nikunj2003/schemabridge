@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
-from schemabridge.domain.mapping import decide_mappings
+from collections.abc import Sequence
+
+from schemabridge.domain import mapping as mapping_module
+from schemabridge.domain.mapping import MappingResult
 from schemabridge.domain.models import ColumnProfile, IssueType, MappingOutcome, SourceColumn
 from schemabridge.domain.normalize import detect_value_kinds, normalize_header
-from schemabridge.domain.target import TargetField
+from schemabridge.domain.target import BUILTIN_SCHEMA, TargetField
+
+
+def decide_mappings(
+    columns: Sequence[SourceColumn], profiles: Sequence[ColumnProfile]
+) -> MappingResult:
+    """Map against the built-in template, which these gate tests are about."""
+    return mapping_module.decide_mappings(columns, profiles, schema=BUILTIN_SCHEMA)
 
 
 def column(column_id: str, header: str, index: int = 0, file_id: str = "f1") -> SourceColumn:
@@ -41,7 +51,7 @@ class TestDeterministicGate:
         )
         decision = next(d for d in result.decisions if d.column_id == "c1")
         assert decision.outcome is MappingOutcome.AUTO_MAPPED
-        assert decision.target is TargetField.EMPLOYEE_ID
+        assert decision.target == TargetField.EMPLOYEE_ID
         assert decision.basis == "exact_name"
 
     def test_auto_maps_a_known_alias_with_compatible_values(self) -> None:
@@ -51,7 +61,7 @@ class TestDeterministicGate:
         )
         decision = next(d for d in result.decisions if d.column_id == "c1")
         assert decision.outcome is MappingOutcome.AUTO_MAPPED
-        assert decision.target is TargetField.FULL_NAME
+        assert decision.target == TargetField.FULL_NAME
         assert decision.basis == "alias"
 
     def test_explains_itself_rather_than_emitting_a_score(self) -> None:
@@ -86,7 +96,7 @@ class TestEscalationGate:
         mapped = [
             d
             for d in result.decisions
-            if d.target is TargetField.EMPLOYEE_ID and d.outcome is MappingOutcome.AUTO_MAPPED
+            if d.target == TargetField.EMPLOYEE_ID and d.outcome is MappingOutcome.AUTO_MAPPED
         ]
         assert len(mapped) <= 1
 
@@ -157,6 +167,6 @@ class TestCrossFileReconciliation:
         mapped = [
             d
             for d in result.decisions
-            if d.target is TargetField.EMPLOYEE_ID and d.outcome is MappingOutcome.AUTO_MAPPED
+            if d.target == TargetField.EMPLOYEE_ID and d.outcome is MappingOutcome.AUTO_MAPPED
         ]
         assert len(mapped) == 2

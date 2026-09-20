@@ -3,14 +3,27 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
-from schemabridge.domain.models import Disposition, IssueStatus, MappingOutcome, RunPhase
+from schemabridge.domain.models import (
+    ColumnProfile,
+    Disposition,
+    EventExecutionBasis,
+    IssueStatus,
+    MappingOutcome,
+    RunPhase,
+    SourceColumn,
+    SourceFile,
+    SourceRow,
+)
+from schemabridge.domain.rules import RuleOrigin
+from schemabridge.domain.target import BUILTIN_SCHEMA
 from schemabridge.graph.builder import compile_graph
+from schemabridge.graph.state import MigrationState
 from schemabridge.ingest.csv_source import parse_csv
 from schemabridge.ingest.profile import profile_columns
 from schemabridge.ingest.xlsx_source import parse_xlsx
@@ -20,7 +33,10 @@ SAMPLES = Path(__file__).resolve().parents[2] / "fixtures" / "samples"
 
 def initial_state(names: list[str]) -> dict[str, Any]:
     """Build the starting state from sample files, as ingestion will."""
-    files, columns, rows, profiles = [], [], [], []
+    files: list[SourceFile] = []
+    columns: list[SourceColumn] = []
+    rows: list[SourceRow] = []
+    profiles: list[ColumnProfile] = []
     for index, name in enumerate(names):
         file_id = f"f{index}"
         path = SAMPLES / name
@@ -49,6 +65,8 @@ def initial_state(names: list[str]) -> dict[str, Any]:
         "resolutions": {},
         "model_requests": 0,
         "phase": RunPhase.INGESTED,
+        # The contract this run maps onto, snapshotted exactly as the API does.
+        "target_schema": BUILTIN_SCHEMA,
     }
 
 
@@ -115,6 +133,139 @@ class TestCleanRunNeedsNoHuman:
         # Sequence numbers are the UI's polling cursor, so they must be unique.
         seqs = [e.seq for e in result["events"]]
         assert len(seqs) == len(set(seqs))
+        # An agent actor does not imply model use: this run followed policy only.
+        assert {e.execution_basis for e in result["events"]} == {EventExecutionBasis.DETERMINISTIC}
+
+    def _assist_result(self, monkeypatch: pytest.MonkeyPatch, outcome: Any) -> dict[str, Any]:
+        """Run the model-assistance node against a fixed proposal outcome."""
+        from schemabridge.graph import nodes
+
+        state = initial_state(["employees-clean.csv"])
+        state["unresolved_columns"] = (state["columns"][0].id,)
+        monkeypatch.setattr(nodes, "propose_unresolved_mappings", lambda *_a, **_k: outcome)
+        return nodes.assist_with_model(cast(MigrationState, state))
+
+    def _assist(self, monkeypatch: pytest.MonkeyPatch, outcome: Any) -> tuple[Any, ...]:
+        return tuple(self._assist_result(monkeypatch, outcome)["events"])
+
+    def test_model_assistance_records_its_own_execution_basis(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from schemabridge.agent.propose import AcceptedMapping, ProposalOutcome
+
+        state = initial_state(["employees-clean.csv"])
+        column_id = state["columns"][0].id
+        events = self._assist(
+            monkeypatch,
+            ProposalOutcome(
+                accepted=(
+                    AcceptedMapping(
+                        column_id=column_id,
+                        target="employeeId",
+                        evidence=("Verified model suggestion.",),
+                    ),
+                ),
+                requests_used=1,
+                considered=(column_id,),
+            ),
+        )
+
+        # The call, then what it produced, then the offer to remember it — the order
+        # the work actually happened in. The proposal is deterministic: the model made
+        # its judgement when the suggestion was verified, and drafting a rule from a
+        # mapping already in hand costs no second request.
+        assert [e.action for e in events] == [
+            "model_requested",
+            "mapping_applied",
+            "rule_proposed",
+        ]
+        assert [e.seq for e in events] == sorted(e.seq for e in events)
+
+        by_action = {e.action: e.execution_basis for e in events}
+        assert by_action["model_requested"] is EventExecutionBasis.MODEL_ASSISTED
+        assert by_action["mapping_applied"] is EventExecutionBasis.MODEL_ASSISTED
+        # Deterministic, and deliberately so: the rule was drafted from a mapping the
+        # verifier had already accepted, without consulting the model again.
+        assert by_action["rule_proposed"] is EventExecutionBasis.DETERMINISTIC
+
+    def test_a_verified_model_mapping_is_offered_as_a_rule(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The case that makes learning reachable at all.
+
+        Every question that reaches a person is one no rule may settle — an ambiguous
+        header is meant to be asked — so if learning drew only on human decisions it
+        could never fire. A mapping the model placed and the verifier confirmed is the
+        opposite: a header the rules could not handle, an answer already checked, and a
+        request already paid for.
+        """
+        from schemabridge.agent.propose import AcceptedMapping, ProposalOutcome
+
+        state = initial_state(["employees-clean.csv"])
+        column_id = state["columns"][0].id
+        result = self._assist_result(
+            monkeypatch,
+            ProposalOutcome(
+                accepted=(
+                    AcceptedMapping(
+                        column_id=column_id,
+                        target="employeeId",
+                        evidence=("Model suggestion, confirmed by deterministic checks.",),
+                    ),
+                ),
+                requests_used=1,
+                considered=(column_id,),
+            ),
+        )
+        proposals = result.get("proposed_rules", ())
+        assert len(proposals) == 1
+        proposed = proposals[0].rule
+        assert proposed.field_name == "employeeId"
+        assert proposed.origin is RuleOrigin.LEARNED
+        # Offered, never applied: a rule nobody approved must not affect anything.
+        assert proposed.rule_id == ""
+
+    def test_a_request_whose_suggestions_were_all_refused_is_still_marked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A model call must never be invisible just because nothing was applied."""
+        from schemabridge.agent.propose import ProposalOutcome
+
+        state = initial_state(["employees-clean.csv"])
+        column_id = state["columns"][0].id
+        events = self._assist(
+            monkeypatch,
+            ProposalOutcome(
+                rejected=((column_id, "The values do not look like that field."),),
+                requests_used=1,
+                considered=(column_id,),
+            ),
+        )
+
+        marked = [e for e in events if e.execution_basis is EventExecutionBasis.MODEL_ASSISTED]
+        assert [e.action for e in marked] == ["model_requested"]
+        # The refusal was the rule engine's, and says whose proposal it refused.
+        refusal = next(e for e in events if e.action == "mapping_suggestion_rejected")
+        assert refusal.execution_basis is EventExecutionBasis.DETERMINISTIC
+        assert "model proposed" in refusal.reason
+
+    def test_no_request_means_no_model_mark(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An exhausted budget never calls out, so nothing may claim it did."""
+        from schemabridge.agent.propose import ProposalOutcome
+
+        state = initial_state(["employees-clean.csv"])
+        column_id = state["columns"][0].id
+        events = self._assist(
+            monkeypatch,
+            ProposalOutcome(
+                requests_used=0,
+                unavailable_reason="The daily allowance is spent.",
+                considered=(column_id,),
+            ),
+        )
+
+        assert [e.action for e in events] == ["model_unavailable"]
+        assert all(e.execution_basis is EventExecutionBasis.DETERMINISTIC for e in events)
 
 
 class TestMessyRunPausesForAHuman:
@@ -173,6 +324,7 @@ class TestMessyRunPausesForAHuman:
         # The decision is attributed to the reviewer, not the agent.
         reviewer_events = [e for e in resumed["events"] if e.actor == "reviewer"]
         assert reviewer_events
+        assert {e.execution_basis for e in reviewer_events} == {EventExecutionBasis.HUMAN}
 
     def test_a_correction_is_revalidated_not_trusted(self, graph: Any) -> None:
         config = {"configurable": {"thread_id": "messy-4"}}

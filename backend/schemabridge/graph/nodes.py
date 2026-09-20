@@ -5,6 +5,11 @@ pure domain functions, and returns the delta. Keeping the decisions in
 `schemabridge.domain` means they stay testable without a graph, a database, or a
 model — and it keeps the escalation policy in one place rather than scattered
 across orchestration code.
+
+The target schema is one of the things pulled from state. It was snapshotted when
+the run was created, so editing a saved schema cannot retroactively change what a
+paused migration is being validated against — a run's contract is fixed at the
+moment it starts.
 """
 
 from __future__ import annotations
@@ -13,6 +18,10 @@ from typing import Any
 
 from langgraph.types import interrupt
 
+from schemabridge.agent.induce import (
+    propose_rule_from_decision,
+    propose_rule_from_model_mapping,
+)
 from schemabridge.agent.propose import propose_unresolved_mappings
 from schemabridge.domain.identity import IncomingRow, reconcile_identities
 from schemabridge.domain.mapping import POLICY_VERSION, decide_mappings
@@ -23,6 +32,7 @@ from schemabridge.domain.models import (
     DeliveryIntent,
     DeliveryState,
     Disposition,
+    EventExecutionBasis,
     IssueOption,
     IssueResolution,
     IssueStatus,
@@ -36,9 +46,15 @@ from schemabridge.domain.models import (
     RunPhase,
     ValidationError,
 )
-from schemabridge.domain.target import TARGET_FIELDS, TargetField, get_field
+from schemabridge.domain.rules import ProposedRule
+from schemabridge.domain.schema import TargetSchema
 from schemabridge.domain.validate import run_validation_passes
-from schemabridge.graph.state import MigrationState, next_sequence
+from schemabridge.graph.state import (
+    MigrationState,
+    next_sequence,
+    run_rules,
+    run_schema,
+)
 from schemabridge.server.target_client import (
     MAX_ATTEMPTS,
     attempt_record,
@@ -50,11 +66,33 @@ from schemabridge.server.target_client import (
 )
 
 
+def _label(schema: TargetSchema, name: str | None) -> str:
+    """A field's human name, falling back to the raw name."""
+    if not name:
+        return "this value"
+    spec = schema.field(name)
+    return spec.label if spec else name
+
+
+def _subject_of(schema: TargetSchema, record: CanonicalRecord) -> str:
+    """How to name a record in the audit trail.
+
+    The schema's naming field rather than its identity field: a detected schema
+    declares no identity, and "rec:row-3" is a handle the reviewer cannot find in
+    their own file.
+    """
+    naming = schema.naming_field
+    if naming and (value := record.values.get(naming)):
+        return value
+    return record.id
+
+
 def _event(
     seq: int,
     action: str,
     reason: str,
     *,
+    execution_basis: EventExecutionBasis,
     actor: Actor = Actor.AGENT,
     subject: str | None = None,
     before: str | None = None,
@@ -64,6 +102,7 @@ def _event(
     return AuditEvent(
         seq=seq,
         actor=actor,
+        execution_basis=execution_basis,
         action=action,
         reason=reason,
         subject=subject,
@@ -82,25 +121,57 @@ def propose_mappings(state: MigrationState) -> dict[str, Any]:
     """Decide which source column becomes which target field."""
     columns = state.get("columns", ())
     profiles = state.get("profiles", ())
+    schema = run_schema(state)
     seq = next_sequence(state)
 
-    result = decide_mappings(columns, profiles)
+    rules = run_rules(state)
+    result = decide_mappings(columns, profiles, schema=schema, rules=rules)
 
     events: list[AuditEvent] = []
     for decision in result.decisions:
         column = next((c for c in columns if c.id == decision.column_id), None)
         header = column.header if column else decision.column_id
 
-        if decision.outcome is MappingOutcome.AUTO_MAPPED and decision.target:
-            spec = get_field(decision.target.value)
+        # Which rule answered, when one did, so the trail can distinguish a match the
+        # engine shipped knowing from one this person taught it. Read back from the
+        # overlay rather than from the decision, because the decision records the
+        # basis but not the rule's identity — and from the index that actually
+        # answered: an excluded column was decided by an ignore rule, and asking the
+        # alias index about it would find nothing and silently drop the attribution.
+        matched = None
+        if decision.basis is MappingBasis.LEARNED_ALIAS:
+            matched = (
+                rules.ignores(header)
+                if decision.outcome is MappingOutcome.EXCLUDED
+                else rules.alias_for(header)
+            )
+        rule_id = matched.rule_id if matched else None
+        rule_origin = matched.origin.value if matched else None
+
+        if decision.outcome is MappingOutcome.EXCLUDED:
+            events.append(
+                _event(
+                    seq,
+                    "column_skipped",
+                    decision.evidence[0] if decision.evidence else "Left out by a rule.",
+                    execution_basis=EventExecutionBasis.DETERMINISTIC,
+                    subject=header,
+                    rule_id=rule_id,
+                    rule_origin=rule_origin,
+                )
+            )
+        elif decision.outcome is MappingOutcome.AUTO_MAPPED and decision.target:
             events.append(
                 _event(
                     seq,
                     "mapping_applied",
                     decision.evidence[0] if decision.evidence else "Deterministic match.",
+                    execution_basis=EventExecutionBasis.DETERMINISTIC,
                     subject=header,
-                    after=spec.label if spec else decision.target.value,
+                    after=_label(schema, decision.target),
                     basis=decision.basis.value,
+                    rule_id=rule_id,
+                    rule_origin=rule_origin,
                 )
             )
         else:
@@ -109,19 +180,26 @@ def propose_mappings(state: MigrationState) -> dict[str, Any]:
                     seq,
                     "mapping_escalated",
                     decision.evidence[0] if decision.evidence else "No confident match.",
+                    execution_basis=EventExecutionBasis.DETERMINISTIC,
                     subject=header,
                 )
             )
         seq += 1
 
     automatic = sum(1 for d in result.decisions if d.outcome is MappingOutcome.AUTO_MAPPED)
+    learned = sum(1 for d in result.decisions if d.basis is MappingBasis.LEARNED_ALIAS)
     events.append(
         _event(
             seq,
             "mapping_summary",
-            f"{automatic} of {len(result.decisions)} columns mapped without asking.",
+            (
+                f"{automatic} of {len(result.decisions)} columns mapped without asking"
+                + (f", {learned} of them by a rule you approved." if learned else ".")
+            ),
+            execution_basis=EventExecutionBasis.DETERMINISTIC,
             automatic=automatic,
             escalated=len(result.decisions) - automatic,
+            learned=learned,
         )
     )
 
@@ -148,27 +226,66 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
 
     columns = list(state.get("columns", ()))
     profiles = {profile.column_id: profile for profile in state.get("profiles", ())}
+    schema = run_schema(state)
     taken = {
-        decision.target.value
+        decision.target
         for decision in state.get("mappings", ())
         if decision.outcome is MappingOutcome.AUTO_MAPPED and decision.target
     }
 
-    outcome = propose_unresolved_mappings(columns, profiles, unresolved, taken)
+    outcome = propose_unresolved_mappings(
+        columns,
+        profiles,
+        unresolved,
+        taken,
+        schema=schema,
+        run_id=str(state.get("run_id", "")),
+        owner_id=str(state.get("owner_id", "anonymous:shared")),
+        workspace_kind=str(state.get("workspace_kind", "anonymous")),
+        expires_at=state.get("run_expires_at"),
+        # The committed counter, not a local tally: this node can be reached again
+        # after a pause, in a different process, and the checkpoint is the only
+        # place that remembers what the run has already spent.
+        requests_used_in_run=int(state.get("model_requests", 0)),
+    )
 
     seq = next_sequence(state)
     by_id = {column.id: column for column in columns}
     added: list[MappingDecision] = []
     events: list[AuditEvent] = []
+    proposals: list[ProposedRule] = []
+
+    # The call itself, recorded where it happened. Without this a request whose
+    # every suggestion the verifier then refused would leave no trace of the model
+    # in the trail at all, while the run's model_requests counter said otherwise.
+    # Keyed on requests_used, so an exhausted budget — which never calls out —
+    # records nothing, and a provider timeout still records that a call was made.
+    if outcome.requests_used > 0:
+        events.append(
+            _event(
+                seq,
+                "model_requested",
+                (
+                    f"Asked the model about {len(outcome.considered)} column(s) the "
+                    f"rules could not place. Every reply is verified before it is used."
+                ),
+                execution_basis=EventExecutionBasis.MODEL_ASSISTED,
+                columns=len(outcome.considered),
+                requests=outcome.requests_used,
+            )
+        )
+        seq += 1
 
     for accepted in outcome.accepted:
-        target = TargetField(accepted.target)
-        spec = get_field(accepted.target)
+        # No enum reconstruction here: the name came from the run's schema, which
+        # is chosen per run, so TargetField(...) would raise for anything outside
+        # the built-in template. The verification gate in `check_proposed_mapping`
+        # is what guarantees the name is real.
         header = by_id[accepted.column_id].header
         added.append(
             MappingDecision(
                 column_id=accepted.column_id,
-                target=target,
+                target=accepted.target,
                 outcome=MappingOutcome.AUTO_MAPPED,
                 basis=MappingBasis.MODEL_ASSISTED,
                 evidence=accepted.evidence,
@@ -179,12 +296,42 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
                 seq,
                 "mapping_applied",
                 accepted.evidence[-1] if accepted.evidence else "Model suggestion, verified.",
+                execution_basis=EventExecutionBasis.MODEL_ASSISTED,
                 subject=header,
-                after=spec.label if spec else accepted.target,
+                after=_label(schema, accepted.target),
                 basis=MappingBasis.MODEL_ASSISTED.value,
             )
         )
         seq += 1
+
+        # Offer to remember it. The model placed a header the rules could not, and
+        # the verifier agreed independently, so this is the clearest case there is —
+        # and it needs no further model request, because the judgement has been made.
+        proposal = propose_rule_from_model_mapping(
+            header,
+            accepted.target,
+            accepted.evidence,
+            schema=schema,
+            run_id=str(state.get("run_id", "")),
+        )
+        if proposal is not None:
+            proposals.append(proposal)
+            events.append(
+                _event(
+                    seq,
+                    "rule_proposed",
+                    (
+                        f'Keeping a rule for "{header}" would let the next file with '
+                        f"that column skip the model entirely. Nothing changes until "
+                        f"you approve it."
+                    ),
+                    execution_basis=EventExecutionBasis.DETERMINISTIC,
+                    subject=header,
+                    scope=proposal.scope.value,
+                    rule_kind=proposal.rule.kind.value,
+                )
+            )
+            seq += 1
 
     for column_id, why in outcome.rejected:
         header = by_id[column_id].header if column_id in by_id else column_id
@@ -192,7 +339,10 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
             _event(
                 seq,
                 "mapping_suggestion_rejected",
-                why,
+                f"The model proposed a field for this column and it was refused. {why}",
+                # The verifier rejected the proposal, so this recorded action is
+                # deterministic—not an accepted model-assisted decision.
+                execution_basis=EventExecutionBasis.DETERMINISTIC,
                 subject=header,
             )
         )
@@ -204,6 +354,7 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
                 seq,
                 "model_unavailable",
                 outcome.unavailable_reason,
+                execution_basis=EventExecutionBasis.DETERMINISTIC,
                 actor=Actor.SYSTEM,
                 columns=len(outcome.considered),
             )
@@ -235,13 +386,17 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
                 options=(
                     *[
                         IssueOption(
-                            id=f"map:{spec.name.value}",
+                            id=f"map:{spec.name}",
                             label=f"Map to {spec.label}",
-                            detail=f'Treat "{column.header}" as {spec.description}',
+                            detail=(
+                                f'Treat "{column.header}" as {spec.description}'
+                                if spec.description
+                                else f'Treat "{column.header}" as {spec.label}.'
+                            ),
                             target=spec.name,
                         )
-                        for spec in TARGET_FIELDS
-                        if spec.name.value not in taken
+                        for spec in schema.fields
+                        if spec.name not in taken
                     ],
                     IssueOption(
                         id="ignore",
@@ -257,6 +412,7 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
         "issues": tuple(issues),
         "unresolved_columns": still_unresolved,
         "events": tuple(events),
+        "proposed_rules": tuple(proposals),
         "model_requests": state.get("model_requests", 0) + outcome.requests_used,
     }
 
@@ -281,7 +437,7 @@ def _issue_payload(issue: ReviewIssue) -> dict[str, Any]:
                 "id": option.id,
                 "label": option.label,
                 "detail": option.detail,
-                "target": option.target.value if option.target else None,
+                "target": option.target,
                 "value": option.value,
             }
             for option in issue.options
@@ -346,6 +502,7 @@ def await_review(state: MigrationState) -> dict[str, Any]:
                 seq,
                 f"issue_{action.value}",
                 note or f"Reviewer chose to {action.value} this case.",
+                execution_basis=EventExecutionBasis.HUMAN,
                 actor=Actor.REVIEWER,
                 subject=issue.field_name or issue.column_id,
                 after=option_id or value,
@@ -372,6 +529,7 @@ def apply_resolutions(state: MigrationState) -> dict[str, Any]:
 
     issues = {issue.id: issue for issue in state.get("issues", ())}
     columns = {column.id: column for column in state.get("columns", ())}
+    schema = run_schema(state)
 
     added: list[MappingDecision] = []
     events: list[AuditEvent] = []
@@ -394,8 +552,7 @@ def apply_resolutions(state: MigrationState) -> dict[str, Any]:
         if option and option.target:
             column_id = issue.column_id or option_id.removeprefix("use:")
             if column_id in columns:
-                spec = get_field(option.target.value)
-                label = spec.label if spec else option.target.value
+                label = _label(schema, option.target)
                 added.append(
                     MappingDecision(
                         column_id=column_id,
@@ -411,9 +568,10 @@ def apply_resolutions(state: MigrationState) -> dict[str, Any]:
                         seq,
                         "mapping_corrected",
                         f"Reviewer mapped this column to {label}.",
+                        execution_basis=EventExecutionBasis.HUMAN,
                         actor=Actor.REVIEWER,
                         subject=columns[column_id].header,
-                        after=option.target.value,
+                        after=option.target,
                     )
                 )
                 seq += 1
@@ -426,9 +584,137 @@ def apply_resolutions(state: MigrationState) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _accepted_targets(state: MigrationState) -> dict[str, TargetField]:
-    """Column to target, with reviewer corrections taking precedence."""
-    accepted: dict[str, TargetField] = {}
+def induce_rules(state: MigrationState) -> dict[str, Any]:
+    """Draft rules from the decisions the reviewer just made.
+
+    Placed after `apply_resolutions` because it needs the answer, and gated on
+    `induced_for` because the graph re-enters that path once per correction cycle:
+    without the gate, every decision a reviewer made would re-draft a rule for every
+    decision before it, and the budget would go on repeats.
+
+    Nothing here changes the migration. The reviewer's decision has already been
+    applied by the time this runs; a proposal is an offer about *future* runs, and a
+    value-scope proposal only touches this run once it is approved. That separation
+    is what makes it safe for the drafting step to be the least reliable part of the
+    system.
+    """
+    resolutions = state.get("resolutions", {})
+    if not resolutions:
+        return {}
+
+    already = set(state.get("induced_for", ()))
+    pending = [issue_id for issue_id in resolutions if issue_id not in already]
+    if not pending:
+        return {}
+
+    issues = {issue.id: issue for issue in state.get("issues", ())}
+    headers = {column.id: column.header for column in state.get("columns", ())}
+    schema = run_schema(state)
+    run_id = str(state.get("run_id", ""))
+    spent = int(state.get("model_requests", 0))
+
+    proposals: list[ProposedRule] = []
+    events: list[AuditEvent] = []
+    seq = next_sequence(state)
+
+    for issue_id in pending:
+        issue = issues.get(issue_id)
+        choice = resolutions.get(issue_id)
+        if issue is None or not isinstance(choice, dict):
+            continue
+
+        action = str(choice.get("action", "approve"))
+        chosen = str(choice.get("value") or choice.get("option_id") or action)
+        # The reviewer can pre-authorise on the question itself, which is what lets a
+        # value rule apply to the rest of the run without interrupting them twice.
+        pre_approved = bool(choice.get("remember"))
+
+        proposal, used, unavailable = propose_rule_from_decision(
+            issue,
+            action,
+            chosen,
+            schema=schema,
+            run_id=run_id,
+            owner_id=str(state.get("owner_id", "anonymous:shared")),
+            workspace_kind=str(state.get("workspace_kind", "anonymous")),
+            expires_at=state.get("run_expires_at"),
+            # So a decision about a column the schema itself makes ambiguous is
+            # filtered before a request is spent on a rule that cannot be accepted.
+            column_header=headers.get(issue.column_id or "", ""),
+            requests_used_in_run=spent,
+            pre_approved=pre_approved,
+        )
+        spent += used
+
+        if used > 0:
+            events.append(
+                _event(
+                    seq,
+                    "rule_induction_requested",
+                    (
+                        "Asked the model whether this decision generalises into a rule "
+                        "worth keeping. Any draft is checked against the schema first."
+                    ),
+                    execution_basis=EventExecutionBasis.MODEL_ASSISTED,
+                    subject=issue.id,
+                )
+            )
+            seq += 1
+
+        if proposal is None:
+            # Recorded either way. A request shown in the trail with nothing after it
+            # reads as a failure, and a refusal a reviewer cannot see is a refusal
+            # they cannot trust.
+            events.append(
+                _event(
+                    seq,
+                    "rule_not_proposed" if used > 0 else "rule_induction_skipped",
+                    unavailable
+                    or (
+                        "No rule was drafted from this decision: it is about this "
+                        "file rather than a pattern that would recur."
+                    ),
+                    execution_basis=EventExecutionBasis.DETERMINISTIC,
+                    actor=Actor.SYSTEM,
+                    subject=issue.id,
+                )
+            )
+            seq += 1
+            continue
+
+        proposals.append(proposal)
+        events.append(
+            _event(
+                seq,
+                "rule_proposed",
+                (
+                    f"{proposal.rationale} Nothing changes until you approve it."
+                    if proposal.rationale
+                    else "A rule was drafted from your decision. Nothing changes "
+                    "until you approve it."
+                ),
+                execution_basis=EventExecutionBasis.MODEL_ASSISTED,
+                subject=issue.id,
+                scope=proposal.scope.value,
+                rule_kind=proposal.rule.kind.value,
+            )
+        )
+        seq += 1
+
+    return {
+        "proposed_rules": tuple(proposals),
+        # Recorded for every pending issue, including those that produced nothing:
+        # a decision that did not generalise must not be reconsidered on the next
+        # pass, or the refusal would be paid for repeatedly.
+        "induced_for": tuple(already | set(pending)),
+        "events": tuple(events),
+        "model_requests": spent,
+    }
+
+
+def _accepted_targets(state: MigrationState) -> dict[str, str]:
+    """Column to target field name, with reviewer corrections taking precedence."""
+    accepted: dict[str, str] = {}
     for decision in state.get("mappings", ()):
         if decision.outcome is MappingOutcome.AUTO_MAPPED and decision.target:
             accepted[decision.column_id] = decision.target
@@ -439,6 +725,7 @@ def reconcile(state: MigrationState) -> dict[str, Any]:
     """Project rows onto the target shape, then merge them into one record each."""
     targets = _accepted_targets(state)
     files = {source.id: source for source in state.get("files", ())}
+    schema = run_schema(state)
     seq = next_sequence(state)
 
     incoming: list[IncomingRow] = []
@@ -446,7 +733,7 @@ def reconcile(state: MigrationState) -> dict[str, Any]:
         values: dict[str, str | None] = {}
         for column_id, raw in row.values.items():
             if target := targets.get(column_id):
-                values[target.value] = raw
+                values[target] = raw
         source = files.get(row.file_id)
         incoming.append(
             IncomingRow(
@@ -460,15 +747,16 @@ def reconcile(state: MigrationState) -> dict[str, Any]:
             )
         )
 
-    result = reconcile_identities(incoming)
+    result = reconcile_identities(incoming, schema=schema, rules=run_rules(state))
     events = [
         _event(
             seq,
             "records_reconciled",
             (
                 f"{len(incoming)} source rows became {len(result.records)} records; "
-                f"{result.merged_rows} were merged as the same person."
+                f"{result.merged_rows} were merged as the same record."
             ),
+            execution_basis=EventExecutionBasis.DETERMINISTIC,
             source_rows=len(incoming),
             records=len(result.records),
             merged=result.merged_rows,
@@ -520,6 +808,17 @@ def _record_resolutions(state: MigrationState) -> tuple[set[str], dict[str, dict
 def clean_and_validate(state: MigrationState) -> dict[str, Any]:
     """Apply safe repairs and validate, escalating anything that fails twice."""
     seq = next_sequence(state)
+    schema = run_schema(state)
+    rules = run_rules(state)
+    # Which source header supplied each field, so a date rule scoped to one column
+    # is not applied to another column feeding the same field.
+    headers_by_field = {
+        decision.target: column.header
+        for decision in state.get("mappings", ())
+        if decision.target
+        for column in state.get("columns", ())
+        if column.id == decision.column_id
+    }
     excluded_ids, corrections = _record_resolutions(state)
     validated: list[CanonicalRecord] = []
     issues: list[ReviewIssue] = []
@@ -543,19 +842,20 @@ def clean_and_validate(state: MigrationState) -> dict[str, Any]:
         if applied:
             values.update(applied)
 
-        outcome = run_validation_passes(values)
+        outcome = run_validation_passes(
+            values, schema=schema, rules=rules, headers=headers_by_field
+        )
         repair_count += len(outcome.repairs)
 
         for repair in outcome.repairs:
-            spec = get_field(repair.field_name)
-            field_label = spec.label if spec else repair.field_name
             rule = repair.rule.replace("_", " ")
             events.append(
                 _event(
                     seq,
                     "value_repaired",
-                    f"{field_label}: {rule}.",
-                    subject=record.values.get("employeeId") or record.id,
+                    f"{_label(schema, repair.field_name)}: {rule}.",
+                    execution_basis=EventExecutionBasis.DETERMINISTIC,
+                    subject=_subject_of(schema, record),
                     before=repair.before,
                     after=repair.after,
                 )
@@ -563,14 +863,14 @@ def clean_and_validate(state: MigrationState) -> dict[str, Any]:
             seq += 1
 
         for field_name, new_value in applied.items():
-            spec = get_field(field_name)
             events.append(
                 _event(
                     seq,
                     "value_corrected",
-                    f"Reviewer supplied a {spec.label if spec else field_name}.",
+                    f"Reviewer supplied a {_label(schema, field_name)}.",
+                    execution_basis=EventExecutionBasis.HUMAN,
                     actor=Actor.REVIEWER,
-                    subject=record.values.get("employeeId") or record.id,
+                    subject=_subject_of(schema, record),
                     before=record.values.get(field_name),
                     after=new_value,
                 )
@@ -600,15 +900,13 @@ def clean_and_validate(state: MigrationState) -> dict[str, Any]:
                 else "Safe repairs were applied and it is still invalid."
             )
             invalid_field = errors[0].field_name if errors else None
-            spec = get_field(invalid_field) if invalid_field else None
-            label = spec.label if spec else (invalid_field or "this value")
+            label = _label(schema, invalid_field)
             issues.append(
                 ReviewIssue(
                     id=f"issue:invalid:{record.id}",
                     type=IssueType.VALIDATION_FAILED_TWICE,
                     reason=(
-                        f"{record.values.get('employeeId') or record.id} failed validation "
-                        f"twice. {explanation}"
+                        f"{_subject_of(schema, record)} failed validation twice. {explanation}"
                     ),
                     blocking=True,
                     record_ids=(record.id,),
@@ -643,7 +941,8 @@ def clean_and_validate(state: MigrationState) -> dict[str, Any]:
                     seq,
                     "validation_failed_twice",
                     explanation,
-                    subject=record.values.get("employeeId") or record.id,
+                    execution_basis=EventExecutionBasis.DETERMINISTIC,
+                    subject=_subject_of(schema, record),
                     errors=len(errors),
                 )
             )
@@ -655,6 +954,7 @@ def clean_and_validate(state: MigrationState) -> dict[str, Any]:
             seq,
             "validation_summary",
             f"{ready} of {len(validated)} records are valid and ready to deliver.",
+            execution_basis=EventExecutionBasis.DETERMINISTIC,
             ready=ready,
             needs_review=len(validated) - ready,
             repairs=repair_count,
@@ -680,6 +980,7 @@ def deliver(state: MigrationState) -> dict[str, Any]:
     """
     run_id = state.get("run_id", "run")
     records = state.get("records", ())
+    schema = run_schema(state)
     existing = {intent.record_id: intent for intent in state.get("deliveries", ())}
     demo_config = state.get("demo_delivery", {}) or {}
 
@@ -709,8 +1010,8 @@ def deliver(state: MigrationState) -> dict[str, Any]:
             if attempt_number > MAX_ATTEMPTS:
                 continue
 
-            employee_id = record.values.get("employeeId") or record.id
-            payload = build_payload(record)
+            subject = _subject_of(schema, record)
+            payload = build_payload(record, schema=schema)
             digest = payload_hash(payload)
             key = idempotency_key(run_id, record)
 
@@ -719,7 +1020,8 @@ def deliver(state: MigrationState) -> dict[str, Any]:
                     seq,
                     "delivery_attempted",
                     f"Sending to the destination (attempt {attempt_number}).",
-                    subject=employee_id,
+                    execution_basis=EventExecutionBasis.DETERMINISTIC,
+                    subject=subject,
                     attempt=attempt_number,
                 )
             )
@@ -727,8 +1029,15 @@ def deliver(state: MigrationState) -> dict[str, Any]:
 
             # Per-record demo behaviour, configured by the run rather than
             # inferred from the data, so production logic has no test branches.
+            #
+            # Keyed on the record's *identity*, not the name shown in the audit
+            # trail: those diverged once display started preferring a person's
+            # name, and looking the behaviour up by "Asha Rao" silently matched
+            # nothing.
             demo_headers: dict[str, str] = {}
-            behaviour = demo_config.get(employee_id)
+            identity = schema.identity_field
+            demo_key = (identity and record.values.get(identity)) or record.id
+            behaviour = demo_config.get(demo_key)
             if behaviour == "fail_once" and attempt_number == 1:
                 demo_headers["x-demo-fail-once"] = "1"
             elif behaviour == "reject":
@@ -738,8 +1047,10 @@ def deliver(state: MigrationState) -> dict[str, Any]:
                 client,
                 run_id,
                 record,
+                schema=schema,
                 request_origin=state.get("request_origin"),
                 attempt_number=attempt_number,
+                run_expires_at=state.get("run_expires_at"),
                 demo_headers=demo_headers or None,
             )
 
@@ -773,7 +1084,8 @@ def deliver(state: MigrationState) -> dict[str, Any]:
                     seq,
                     action,
                     result.detail,
-                    subject=employee_id,
+                    execution_basis=EventExecutionBasis.DETERMINISTIC,
+                    subject=subject,
                     after=result.target_id,
                     status=result.status_code,
                     attempt=attempt_number,
@@ -796,6 +1108,7 @@ def deliver(state: MigrationState) -> dict[str, Any]:
             seq,
             "delivery_summary",
             summary + ".",
+            execution_basis=EventExecutionBasis.DETERMINISTIC,
             delivered=delivered,
             failed=failed,
             retrying=waiting,

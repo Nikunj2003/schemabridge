@@ -99,12 +99,26 @@ class TestProfileColumns:
         assert ValueKind.EMAIL in email.detected_kinds
         assert len(email.samples) <= INGEST_LIMITS.max_samples_per_column
 
-    def test_counts_blanks_without_treating_them_as_values(self) -> None:
+    def test_a_wholly_blank_line_is_not_a_row(self) -> None:
+        """An empty line in a CSV is formatting, not a record with no values."""
         parsed = parse_csv("f1", "a.csv", "dept\nFinance\n\nOps\n")
         assert parsed.ok
         dept = profile_columns(parsed.file, parsed.rows)[0]
-        assert dept.total_count == 2
-        assert dept.non_empty_count == 2
+        assert (dept.total_count, dept.non_empty_count) == (2, 2)
+
+    def test_a_barely_filled_column_reports_as_such(self) -> None:
+        """`total_count` spans every row; `non_empty_count` only the filled ones.
+
+        The gap is the signal. Reporting both as the filled count would tell the
+        model a column with one value in ten rows was complete — which is exactly
+        the evidence that should make it doubt a confident-looking header.
+        """
+        rows = "\n".join([f"E-{index},," for index in range(1, 10)] + ["E-10,,x"])
+        parsed = parse_csv("f1", "a.csv", f"id,note,flag\n{rows}\n")
+        assert parsed.ok
+        note, flag = profile_columns(parsed.file, parsed.rows)[1:]
+        assert (note.total_count, note.non_empty_count) == (10, 0)
+        assert (flag.total_count, flag.non_empty_count) == (10, 1)
 
 
 def workbook_bytes(build: object) -> bytes:

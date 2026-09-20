@@ -7,7 +7,7 @@ would put the whole uploaded dataset back on the wire on every poll.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel
 
@@ -16,12 +16,15 @@ from schemabridge.domain.models import (
     CanonicalRecord,
     DeliveryIntent,
     Disposition,
+    EventExecutionBasis,
     IssueStatus,
+    MappingBasis,
     MappingOutcome,
     ReviewIssue,
     RunPhase,
 )
-from schemabridge.domain.target import TARGET_FIELDS, get_field
+from schemabridge.domain.schema import TargetSchema
+from schemabridge.graph.state import run_schema
 
 
 def _attr(value: Any, name: str, default: Any = None) -> Any:
@@ -42,6 +45,15 @@ def _enum_value(value: Any, default: str = "") -> str:
     if value is None:
         return default
     return str(getattr(value, "value", value))
+
+
+def _event_execution_basis(event: Any) -> str:
+    """Return a safe basis for new, legacy, and degraded checkpoint events."""
+    value = _enum_value(_attr(event, "execution_basis"), EventExecutionBasis.UNKNOWN.value)
+    try:
+        return EventExecutionBasis(value).value
+    except (TypeError, ValueError):
+        return EventExecutionBasis.UNKNOWN.value
 
 
 #: Phases where the UI should keep polling.
@@ -84,6 +96,13 @@ class IssueView(BaseModel):
     field_label: str | None
     current_value: str | None
     affected: int
+    #: Which records this issue is about. The UI needs these to name the employee
+    #: rather than matching on values, which is ambiguous when two people share
+    #: a value and wrong when the issue is about a column rather than a record.
+    record_ids: list[str]
+    #: The source column's own header, for issues raised about a column.
+    column: str | None
+    column_file: str | None
     options: list[dict[str, Any]]
     errors: list[str]
     resolution: dict[str, Any] | None
@@ -93,11 +112,18 @@ class EventView(BaseModel):
     seq: int
     at: str
     actor: str
+    execution_basis: str
     action: str
     reason: str
     subject: str | None
     before: str | None
     after: str | None
+    #: Which rule supplied this step, and whether the person taught it. Projected
+    #: from `detail` as a narrow allowlist rather than by sending the whole dict:
+    #: `detail` carries internal counters the browser has no use for, and widening
+    #: it later is a smaller decision than narrowing it.
+    rule_id: str | None = None
+    rule_origin: str | None = None
 
 
 class CountersView(BaseModel):
@@ -115,6 +141,15 @@ class CountersView(BaseModel):
     #: totals reconcile and the UI can show that work remains.
     retrying: int
     awaiting_review: int
+    #: Decisions a rule supplied, shipped or taught.
+    rule_hits: int = 0
+    #: The subset from a rule this person approved, which is the number that shows
+    #: the engine improving rather than merely working.
+    learned_hits: int = 0
+    #: Columns a learned rule placed that had no deterministic answer, so they would
+    #: otherwise have gone to the model. This is the savings claim, and it is
+    #: counted from mapping decisions rather than estimated.
+    model_requests_avoided: int = 0
 
 
 class RunView(BaseModel):
@@ -132,6 +167,12 @@ class RunView(BaseModel):
     events: list[EventView]
     latest_seq: int
     blocked_reason: str | None
+    #: The contract this run was validated against, named so the UI can say which.
+    schema_name: str
+    schema_id: str
+    #: Its fields, so the record tables can show the right columns. A run on a
+    #: schema with nothing to do with employment must not render "Work email".
+    schema_fields: list[dict[str, Any]]
 
 
 _PHASE_LABELS: dict[RunPhase, str] = {
@@ -146,13 +187,13 @@ _PHASE_LABELS: dict[RunPhase, str] = {
 }
 
 
-def _mapping_views(state: dict[str, Any]) -> list[MappingView]:
+def _mapping_views(state: dict[str, Any], schema: TargetSchema) -> list[MappingView]:
     columns = {_attr(column, "id"): column for column in state.get("columns", ())}
     views: list[MappingView] = []
     for decision in state.get("mappings", ()):
         column = columns.get(_attr(decision, "column_id"))
         target = _enum_value(_attr(decision, "target"), "") or None
-        spec = get_field(target) if target else None
+        spec = schema.field(target) if target else None
         views.append(
             MappingView(
                 column=_attr(column, "header") or _attr(decision, "column_id", ""),
@@ -172,29 +213,59 @@ def _mapping_views(state: dict[str, Any]) -> list[MappingView]:
     return list(deduped.values())
 
 
+def _last_delivery_detail(intent: Any) -> str | None:
+    """Why the destination refused a record, in the destination's own words.
+
+    Validation errors explain a record that never left; they say nothing about
+    one the target rejected. Reading them for a failed delivery is how a failure
+    ends up displayed with no reason at all.
+    """
+    attempts = _attr(intent, "attempts", ()) or ()
+    for attempt in reversed(list(attempts)):
+        detail = _attr(attempt, "detail", "")
+        if detail:
+            status = _attr(attempt, "status")
+            return f"{detail} (HTTP {status})" if status else str(detail)
+    return None
+
+
 def _record_views(
-    records: tuple[CanonicalRecord, ...], deliveries: tuple[DeliveryIntent, ...]
+    records: tuple[CanonicalRecord, ...],
+    deliveries: tuple[DeliveryIntent, ...],
+    schema: TargetSchema,
 ) -> list[RecordView]:
     targets = {_attr(intent, "record_id"): _attr(intent, "target_id") for intent in deliveries}
+    refusals = {_attr(intent, "record_id"): _last_delivery_detail(intent) for intent in deliveries}
     views: list[RecordView] = []
     for record in records:
         validation = _attr(record, "validation", ()) or ()
         last = validation[-1] if validation else None
         values = dict(_attr(record, "values", {}) or {})
         errors = _attr(last, "errors", ()) if last is not None else ()
+        disposition = _enum_value(_attr(record, "disposition"), "candidate")
+        messages = [_attr(error, "message", "") for error in errors or ()]
+        if disposition == Disposition.FAILED.value:
+            # The destination's reason, not a stale validation message.
+            refusal = refusals.get(_attr(record, "id"))
+            messages = [refusal] if refusal else ["The destination refused this record."]
         views.append(
             RecordView(
                 id=_attr(record, "id", ""),
-                employee_id=values.get("employeeId"),
+                # Whatever the schema calls its identity field, so a record is
+                # nameable in a migration that has nothing to do with employment.
+                # The schema's own naming field, so a record stays identifiable in
+                # a migration that has nothing to do with employment — and in one
+                # whose schema was detected and declares no identity at all.
+                employee_id=(values.get(schema.naming_field) if schema.naming_field else None),
                 values=values,
-                disposition=_enum_value(_attr(record, "disposition"), "candidate"),
+                disposition=disposition,
                 sources=[
                     f"{_attr(p, 'file_name', '')} row {_attr(p, 'row', '?')}"
                     for p in _attr(record, "provenance", ()) or ()
                 ],
                 repairs=len(_attr(record, "repairs", ()) or ()),
                 valid=bool(last is not None and _attr(last, "valid", False)),
-                errors=[_attr(error, "message", "") for error in errors or ()],
+                errors=messages,
                 exclusion_reason=_attr(record, "exclusion_reason"),
                 target_id=targets.get(_attr(record, "id")),
             )
@@ -202,11 +273,17 @@ def _record_views(
     return views
 
 
-def _issue_views(issues: tuple[ReviewIssue, ...]) -> list[IssueView]:
+def _issue_views(
+    issues: tuple[ReviewIssue, ...],
+    schema: TargetSchema,
+    columns: tuple[Any, ...] = (),
+) -> list[IssueView]:
+    by_id = {_attr(column, "id"): column for column in columns}
     views: list[IssueView] = []
     for issue in issues:
         field_name = _attr(issue, "field_name")
-        spec = get_field(field_name) if field_name else None
+        column = by_id.get(_attr(issue, "column_id"))
+        spec = schema.field(field_name) if field_name else None
         resolution = _attr(issue, "resolution")
         resolved_at: Any = _attr(resolution, "resolved_at") if resolution else None
         views.append(
@@ -220,6 +297,9 @@ def _issue_views(issues: tuple[ReviewIssue, ...]) -> list[IssueView]:
                 field_label=spec.label if spec else None,
                 current_value=_attr(issue, "current_value"),
                 affected=len(_attr(issue, "record_ids", ()) or ()),
+                record_ids=list(_attr(issue, "record_ids", ()) or ()),
+                column=_attr(column, "header") if column is not None else None,
+                column_file=_attr(column, "file_name") if column is not None else None,
                 options=[
                     {
                         "id": _attr(option, "id", ""),
@@ -262,19 +342,45 @@ def _counters(state: dict[str, Any]) -> CountersView:
     def disposition_is(record: Any, wanted: Disposition) -> bool:
         return _enum_value(_attr(record, "disposition")) == wanted.value
 
+    # One column can accumulate several decisions as it is corrected. Only the
+    # latest one is the current state; counting them all reports a column total
+    # that grows while the reviewer works.
+    effective: dict[str, Any] = {}
+    for decision in mappings:
+        column_id = _attr(decision, "column_id")
+        if column_id is not None:
+            effective[column_id] = decision
+    current = tuple(effective.values())
+
+    # Rows minus records is only the duplicate count once the records exist.
+    # Before reconciliation runs there are none, and the difference is the whole
+    # dataset — which surfaced as "combined 3 duplicate rows" on a clean file
+    # that had no duplicates at all.
+    rows = len(state.get("rows", ()))
+    merged = max(0, rows - len(records)) if records else 0
+
+    # Counted from the decisions themselves rather than from the rule store, so the
+    # number describes this run and cannot drift if a rule is later edited or
+    # deleted. A learned hit is also an avoided model request by construction: the
+    # rule placed a column that no shipped alias matched, which is precisely the
+    # case that would otherwise have been sent to the model.
+    rule_bases = {MappingBasis.ALIAS.value, MappingBasis.LEARNED_ALIAS.value}
+    rule_hits = sum(1 for m in current if _enum_value(_attr(m, "basis")) in rule_bases)
+    learned_hits = sum(
+        1 for m in current if _enum_value(_attr(m, "basis")) == MappingBasis.LEARNED_ALIAS.value
+    )
+
     return CountersView(
-        source_rows=len(state.get("rows", ())),
+        source_rows=rows,
         records=len(records),
-        merged=max(0, len(state.get("rows", ())) - len(records)),
+        merged=merged,
         auto_mapped=sum(
             1
-            for m in mappings
+            for m in current
             if _enum_value(_attr(m, "outcome")) == MappingOutcome.AUTO_MAPPED.value
         ),
         escalated=sum(
-            1
-            for m in mappings
-            if _enum_value(_attr(m, "outcome")) == MappingOutcome.ESCALATED.value
+            1 for m in current if _enum_value(_attr(m, "outcome")) == MappingOutcome.ESCALATED.value
         ),
         repairs=sum(len(_attr(record, "repairs", ()) or ()) for record in records),
         model_requests=int(state.get("model_requests", 0)),
@@ -288,6 +394,9 @@ def _counters(state: dict[str, Any]) -> CountersView:
             if _enum_value(_attr(issue, "status"), "open") == IssueStatus.OPEN.value
             and _attr(issue, "blocking", True)
         ),
+        rule_hits=rule_hits,
+        learned_hits=learned_hits,
+        model_requests_avoided=learned_hits,
     )
 
 
@@ -303,14 +412,30 @@ def _event_views(events: tuple[AuditEvent, ...], since: int) -> list[EventView]:
                 seq=seq,
                 at=at.isoformat() if hasattr(at, "isoformat") else str(at or ""),
                 actor=_enum_value(_attr(event, "actor"), "agent"),
+                execution_basis=_event_execution_basis(event),
                 action=_attr(event, "action", ""),
                 reason=_attr(event, "reason", ""),
                 subject=_attr(event, "subject"),
                 before=_attr(event, "before"),
                 after=_attr(event, "after"),
+                rule_id=_detail_text(event, "rule_id"),
+                rule_origin=_detail_text(event, "rule_origin"),
             )
         )
     return views
+
+
+def _detail_text(event: Any, key: str) -> str | None:
+    """One allowlisted scalar from an event's detail, as a string or nothing.
+
+    Guarded rather than indexed because `detail` is a plain dict that has survived
+    serialisation, and a checkpoint written before a key existed simply lacks it.
+    """
+    detail = _attr(event, "detail", None)
+    if not isinstance(detail, dict):
+        return None
+    value = detail.get(key)
+    return None if value is None else str(value)
 
 
 def build_run_view(
@@ -326,6 +451,9 @@ def build_run_view(
     if not isinstance(phase, RunPhase):
         phase = RunPhase(_enum_value(phase, RunPhase.INGESTED.value))
     events = state.get("events", ())
+    # The run's own snapshotted contract, so labels and the identity field match
+    # what this migration was actually validated against.
+    schema = run_schema(cast("Any", state))
 
     return RunView(
         run_id=run_id,
@@ -336,25 +464,40 @@ def build_run_view(
         active=phase in _ACTIVE_PHASES and not paused,
         files=[_attr(source, "name", "") for source in state.get("files", ())],
         counters=_counters(state),
-        mappings=_mapping_views(state),
-        issues=_issue_views(state.get("issues", ())),
-        records=_record_views(state.get("records", ()), state.get("deliveries", ())),
+        mappings=_mapping_views(state, schema),
+        issues=_issue_views(state.get("issues", ()), schema, tuple(state.get("columns", ()))),
+        records=_record_views(state.get("records", ()), state.get("deliveries", ()), schema),
         events=_event_views(events, since),
         latest_seq=max((int(_attr(event, "seq", 0)) for event in events), default=0),
         blocked_reason=state.get("blocked_reason"),
+        schema_name=schema.name,
+        schema_id=schema.schema_id,
+        schema_fields=target_schema_view(schema)["fields"],
     )
 
 
-def target_schema_view() -> list[dict[str, Any]]:
-    """The target contract, so the UI can show what is being mapped onto."""
-    return [
-        {
-            "name": spec.name.value,
-            "label": spec.label,
-            "description": spec.description,
-            "required": spec.required,
-            "kind": spec.kind.value,
-            "allowed_values": list(spec.enum_values),
-        }
-        for spec in TARGET_FIELDS
-    ]
+def target_schema_view(schema: TargetSchema) -> dict[str, Any]:
+    """A schema, as the UI needs it: the fields plus what makes each one special."""
+    return {
+        "schema_id": schema.schema_id,
+        "name": schema.name,
+        "description": schema.description,
+        "version": schema.version,
+        "builtin": schema.builtin,
+        "fields": [
+            {
+                "name": spec.name,
+                "label": spec.label,
+                "description": spec.description,
+                "required": spec.required,
+                "kind": spec.kind.value,
+                "is_identity": spec.is_identity,
+                "is_unique": spec.is_unique,
+                "allowed_values": list(spec.enum_values),
+                # Read-only in the builder, but shown: seeing that "doj" will
+                # match is what tells someone their export will work.
+                "spellings": sorted(spec.spellings),
+            }
+            for spec in schema.fields
+        ],
+    }

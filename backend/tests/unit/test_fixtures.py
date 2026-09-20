@@ -2,17 +2,27 @@
 
 If a policy change alters what the engine does automatically versus what it
 escalates, this is where it surfaces.
+
+Everything here runs against the built-in template, which is the contract the
+sample files were written for. That is the point: these assertions are the
+guarantee that making schemas user-definable did not change what the shipped demo
+does. `test_schema.py` covers other schemas.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
-from schemabridge.domain.identity import IncomingRow, reconcile_identities
-from schemabridge.domain.mapping import decide_mappings
+from schemabridge.domain import identity as identity_module
+from schemabridge.domain import mapping as mapping_module
+from schemabridge.domain import validate as validate_module
+from schemabridge.domain.cleanup import SourceValues
+from schemabridge.domain.identity import IncomingRow, ReconcileResult
+from schemabridge.domain.mapping import MappingResult
 from schemabridge.domain.models import (
     ColumnProfile,
     Disposition,
@@ -23,12 +33,27 @@ from schemabridge.domain.models import (
     SourceColumn,
     SourceRow,
 )
-from schemabridge.domain.validate import run_validation_passes
+from schemabridge.domain.target import BUILTIN_SCHEMA
+from schemabridge.domain.validate import TwoPassResult
 from schemabridge.ingest.csv_source import parse_csv
 from schemabridge.ingest.profile import profile_columns
 from schemabridge.ingest.xlsx_source import parse_xlsx
 
 SAMPLES = Path(__file__).resolve().parents[2] / "fixtures" / "samples"
+
+
+def decide_mappings(
+    columns: Sequence[SourceColumn], profiles: Sequence[ColumnProfile]
+) -> MappingResult:
+    return mapping_module.decide_mappings(columns, profiles, schema=BUILTIN_SCHEMA)
+
+
+def reconcile_identities(rows: Sequence[IncomingRow]) -> ReconcileResult:
+    return identity_module.reconcile_identities(rows, schema=BUILTIN_SCHEMA)
+
+
+def run_validation_passes(values: SourceValues) -> TwoPassResult:
+    return validate_module.run_validation_passes(values, schema=BUILTIN_SCHEMA)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +99,7 @@ def project(sources: list[Loaded], decisions: tuple[MappingDecision, ...]) -> li
             values: dict[str, str | None] = {}
             for column_id, raw in row.values.items():
                 if target := target_by_column.get(column_id):
-                    values[target.value] = raw
+                    values[target] = raw
             projected.append(
                 IncomingRow(
                     values=values,
@@ -140,7 +165,7 @@ class TestMessyMultiFileMigration:
         assert issue.type is IssueType.AMBIGUOUS_MAPPING
         assert issue.blocking
         offered = {o.target for o in issue.options if o.target}
-        assert {"startDate", "endDate"} <= {t.value for t in offered}
+        assert {"startDate", "endDate"} <= offered
         assert "could be" in issue.reason.lower()
 
     def test_escalates_only_what_is_genuinely_ambiguous(

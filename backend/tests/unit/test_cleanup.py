@@ -2,8 +2,18 @@
 
 from __future__ import annotations
 
-from schemabridge.domain.cleanup import apply_safe_repairs, normalize_enum_value
-from schemabridge.domain.target import TargetField
+from schemabridge.domain import cleanup as cleanup_module
+from schemabridge.domain.cleanup import RepairResult, SourceValues
+from schemabridge.domain.target import BUILTIN_SCHEMA, TargetField
+
+
+def apply_safe_repairs(values: SourceValues) -> RepairResult:
+    """Repair against the built-in template, which these cases are about."""
+    return cleanup_module.apply_safe_repairs(values, schema=BUILTIN_SCHEMA)
+
+
+def normalize_enum_value(field_name: str, value: str) -> str | None:
+    return cleanup_module.normalize_enum_value(field_name, value, schema=BUILTIN_SCHEMA)
 
 
 class TestApplySafeRepairs:

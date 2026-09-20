@@ -1,50 +1,53 @@
-/**
- * Buttons.
- *
- * Adapted from the author's codenex-ui project (MIT). See THIRD_PARTY_NOTICES.
- */
 "use client";
 
+import Link from "next/link";
 import { cn } from "@/lib/utils";
 
-type Variant = "primary" | "outline" | "ghost" | "danger";
+type Variant = "primary" | "secondary" | "quiet" | "danger";
 type Size = "sm" | "md" | "lg";
 
-const VARIANTS: Record<Variant, string> = {
-  primary:
-    "bg-primary text-primary-foreground hover:bg-primary/90 active:scale-[0.99] shadow-sm",
-  outline:
-    "border border-border bg-card text-foreground hover:bg-secondary hover:border-border",
-  ghost: "text-muted-foreground hover:text-foreground hover:bg-secondary",
-  danger:
-    "border border-destructive/30 bg-destructive/5 text-destructive hover:bg-destructive/10",
+const VARIANT: Record<Variant, string> = {
+  primary: "bg-accent text-white hover:bg-accent-hover",
+  secondary: "border border-line-strong bg-surface text-ink hover:bg-sunken",
+  quiet: "text-ink-muted hover:bg-sunken hover:text-ink",
+  danger: "border border-problem/35 bg-problem-soft text-problem hover:border-problem/60",
 };
 
-const SIZES: Record<Size, string> = {
-  sm: "h-7 px-2.5 text-[12px] gap-1.5 rounded-md",
-  md: "h-9 px-3.5 text-[13px] gap-2 rounded-lg",
-  lg: "h-11 px-5 text-[14px] gap-2 rounded-lg",
+const SIZE: Record<Size, string> = {
+  sm: "h-8 gap-1.5 rounded-md px-2.5 text-[13px]",
+  md: "h-9.5 gap-2 rounded-md px-3.5 text-[14px]",
+  lg: "h-11 gap-2 rounded-md px-5 text-[15px]",
 };
+
+const BASE =
+  "inline-flex shrink-0 items-center justify-center font-medium transition-colors disabled:pointer-events-none disabled:opacity-45";
 
 export function Button({
-  variant = "outline",
+  variant = "secondary",
   size = "md",
   className,
   ...props
-}: React.ButtonHTMLAttributes<HTMLButtonElement> & {
+}: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; size?: Size }) {
+  return <button className={cn(BASE, VARIANT[variant], SIZE[size], className)} {...props} />;
+}
+
+export function ButtonLink({
+  href,
+  variant = "secondary",
+  size = "md",
+  className,
+  children,
+  ...rest
+}: {
+  href: string;
   variant?: Variant;
   size?: Size;
-}) {
+  className?: string;
+  children: React.ReactNode;
+} & Omit<React.ComponentProps<typeof Link>, "href" | "className" | "children">) {
   return (
-    <button
-      className={cn(
-        "inline-flex items-center justify-center font-medium transition-colors",
-        "disabled:pointer-events-none disabled:opacity-50",
-        VARIANTS[variant],
-        SIZES[size],
-        className,
-      )}
-      {...props}
-    />
+    <Link href={href} className={cn(BASE, VARIANT[variant], SIZE[size], className)} {...rest}>
+      {children}
+    </Link>
   );
 }

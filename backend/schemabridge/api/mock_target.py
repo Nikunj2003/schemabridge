@@ -7,32 +7,53 @@ halfway. So this stub:
 - requires a shared secret, so it is not an open write endpoint;
 - enforces idempotency, returning the original receipt on a replay;
 - refuses a reused key carrying different data;
-- validates against the target schema and rejects what does not conform;
+- validates against the target schema the run names, rejecting what does not
+  conform;
 - fails one designated record once, then accepts it, to exercise retry;
 - rejects another permanently, to exercise a failure a human must act on.
 
 The failure behaviour is driven by an explicit header the engine never sends on
 its own, rather than by magic employee ids, so production logic contains no
 special cases for test data.
+
+Which contract to enforce arrives in a header, as the schema itself rather than
+an id to look up: a run's schema may never have been saved — detected from the
+upload, or supplied inline for one migration — so there would be nothing to look
+up. That is safe *here* and nowhere else in this codebase, because the endpoint
+already requires a server-side shared secret and so the header cannot come from a
+browser.
+
+An unreadable header falls back to the built-in template rather than skipping
+validation. A destination that accepts anything when it cannot identify the
+contract is worse than one applying the wrong contract, because the caller never
+learns something was wrong.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import logging
 import secrets
+from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
-from schemabridge.domain.validate import validate_employee
+from schemabridge.domain.schema import TargetSchema
+from schemabridge.domain.target import BUILTIN_SCHEMA
+from schemabridge.domain.validate import validate_record
 from schemabridge.server.config import get_settings
 from schemabridge.server.receipts import (
     PayloadConflictError,
     find_receipt,
     store_receipt,
 )
+from schemabridge.server.target_client import RUN_EXPIRY_HEADER, SCHEMA_HEADER
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/mock/destination", tags=["mock destination"])
 
@@ -43,6 +64,24 @@ _REJECT_HEADER = "x-demo-reject"
 
 #: Keys already failed once, so the second attempt can succeed.
 _failed_once: set[str] = set()
+
+
+def _contract(encoded: str | None) -> TargetSchema:
+    """The schema this request should be validated against.
+
+    Absent or unreadable falls back to the built-in template — see the module
+    docstring for why that is the right failure.
+    """
+    if not encoded:
+        return BUILTIN_SCHEMA
+    try:
+        document = json.loads(base64.b64decode(encoded))
+        return TargetSchema.model_validate(
+            {"schema_id": "delivered", "name": document["name"], "fields": document["fields"]}
+        )
+    except Exception:
+        logger.warning("could not read the target schema header; using the built-in contract")
+        return BUILTIN_SCHEMA
 
 
 def _require_secret(provided: str | None) -> None:
@@ -75,6 +114,8 @@ async def create_employee(
     authorization: Annotated[str | None, Header()] = None,
     fail_once: Annotated[str | None, Header(alias=_FAIL_ONCE_HEADER)] = None,
     reject: Annotated[str | None, Header(alias=_REJECT_HEADER)] = None,
+    target_schema: Annotated[str | None, Header(alias=SCHEMA_HEADER)] = None,
+    run_expires_at: Annotated[str | None, Header(alias=RUN_EXPIRY_HEADER)] = None,
 ) -> JSONResponse:
     """Accept one employee record."""
     token = authorization.removeprefix("Bearer ").strip() if authorization else None
@@ -116,7 +157,7 @@ async def create_employee(
         )
 
     # The destination enforces its own contract; it does not trust the caller.
-    outcome = validate_employee(payload)
+    outcome = validate_record(payload, schema=_contract(target_schema))
     if not outcome.valid:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -131,9 +172,17 @@ async def create_employee(
 
     digest = payload_hash(payload)
     target_id = f"DEST-{digest[:10].upper()}"
+    expires_at: datetime | None = None
+    if run_expires_at:
+        try:
+            expires_at = datetime.fromisoformat(run_expires_at)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="Run expiry header is invalid."
+            ) from None
 
     try:
-        receipt = store_receipt(idempotency_key, target_id, digest, payload)
+        receipt = store_receipt(idempotency_key, target_id, digest, payload, expires_at=expires_at)
     except PayloadConflictError as conflict:
         # Reusing a key for different data would let the destination hold two
         # versions of one identity. Refuse rather than guess which is correct.

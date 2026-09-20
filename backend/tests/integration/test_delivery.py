@@ -20,12 +20,30 @@ import pytest
 import uvicorn
 
 from schemabridge.domain.models import CanonicalRecord, DeliveryOutcome, DeliveryState
+from schemabridge.domain.schema import TargetFieldSpec, TargetSchema, ValueKind
+from schemabridge.domain.target import BUILTIN_SCHEMA
 from schemabridge.server.target_client import (
     build_client,
-    build_payload,
-    deliver_record,
     idempotency_key,
 )
+from schemabridge.server.target_client import (
+    build_payload as _build_payload,
+)
+from schemabridge.server.target_client import (
+    deliver_record as _deliver_record,
+)
+
+
+def build_payload(record_: CanonicalRecord) -> dict[str, Any]:
+    """Payload for the built-in template, which these deliveries target."""
+    return _build_payload(record_, schema=BUILTIN_SCHEMA)
+
+
+def deliver_record(*args: Any, **kwargs: Any) -> Any:
+    """Deliver against the built-in template unless a case names another."""
+    kwargs.setdefault("schema", BUILTIN_SCHEMA)
+    return _deliver_record(*args, **kwargs)
+
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("MONGODB_URI"),
@@ -42,10 +60,28 @@ def _free_port() -> int:
 
 @pytest.fixture(scope="module")
 def origin() -> Iterator[str]:
-    """A real server on a real port."""
-    from main import app
+    """A real server on a real port.
+
+    The engine delivers to its own stub over HTTP, so an in-process test client
+    is not enough: nothing would be listening on the origin it resolves. Running
+    a real server means these tests exercise the same path production does.
+
+    `PORT` is set to the port actually bound, because `_resolve_origin` only
+    trusts a loopback origin whose port matches the one this service believes it
+    is listening on — a deliberate guard against a request-forgery via a
+    client-supplied origin. Without setting it, delivery resolves to the default
+    8000 and these tests pass or fail depending on whether something unrelated
+    happens to be listening there.
+    """
+    from schemabridge.server.config import get_settings
 
     port = _free_port()
+    os.environ["PORT"] = str(port)
+    # The accessor is cached, so the new value has to invalidate it.
+    get_settings.cache_clear()
+
+    from main import app
+
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
@@ -61,6 +97,8 @@ def origin() -> Iterator[str]:
 
     server.should_exit = True
     thread.join(timeout=10)
+    os.environ.pop("PORT", None)
+    get_settings.cache_clear()
 
 
 def record(employee_id: str, *, revision: int = 1) -> CanonicalRecord:
@@ -316,3 +354,86 @@ class TestConcurrency:
         assert results[0].target_id == results[1].target_id
         # Exactly one call created it; the other reconciled.
         assert sorted(r.status_code or 0 for r in results) == [200, 201]
+
+
+class TestTheDestinationEnforcesTheRunsOwnContract:
+    """The destination must validate against the schema the run actually used.
+
+    This was broken by sending a schema *id* for the destination to look up: a
+    schema detected from the upload or supplied inline as a spec is never saved,
+    so there was nothing to look up and every such delivery was silently checked
+    against the built-in employee contract instead. It passed on the clean fixture
+    only because its field names happen to coincide.
+    """
+
+    ORDERS = TargetSchema(
+        schema_id="never_saved",
+        name="Order",
+        fields=(
+            TargetFieldSpec(
+                name="orderRef",
+                label="Order reference",
+                kind=ValueKind.IDENTIFIER,
+                required=True,
+                is_identity=True,
+            ),
+            TargetFieldSpec(
+                name="placedDate", label="Placed date", kind=ValueKind.DATE, required=True
+            ),
+            TargetFieldSpec(
+                name="tier",
+                label="Tier",
+                kind=ValueKind.ENUM,
+                enum_values=("standard", "express"),
+            ),
+        ),
+    )
+
+    def order(self, ref: str) -> CanonicalRecord:
+        return CanonicalRecord(
+            id=f"rec:{ref.lower()}",
+            revision=1,
+            identity_key=ref.lower(),
+            values={"orderRef": ref, "placedDate": "2026-01-05", "tier": "express"},
+        )
+
+    def test_a_schema_that_was_never_saved_is_still_enforced(
+        self, client: httpx.Client, origin: str
+    ) -> None:
+        """Accepted on its own terms, not rejected for lacking employee fields."""
+        result = _deliver_record(
+            client,
+            unique("run"),
+            self.order("ORD-5001"),
+            schema=self.ORDERS,
+            request_origin=origin,
+        )
+        assert result.outcome is DeliveryOutcome.SUCCEEDED, result.detail
+        assert result.target_id
+
+    def test_a_record_invalid_under_that_schema_is_refused(
+        self, client: httpx.Client, origin: str
+    ) -> None:
+        """Proves the contract is applied rather than validation being skipped."""
+        broken = CanonicalRecord(
+            id="rec:ord-5002",
+            revision=1,
+            identity_key="ord-5002",
+            # "overnight" is not one of this schema's permitted tiers.
+            values={"orderRef": "ORD-5002", "placedDate": "2026-01-05", "tier": "overnight"},
+        )
+        result = _deliver_record(
+            client, unique("run"), broken, schema=self.ORDERS, request_origin=origin
+        )
+        assert result.outcome is DeliveryOutcome.FAILED
+        assert result.status_code == 422
+
+    def test_an_employee_record_is_refused_under_an_order_contract(
+        self, client: httpx.Client, origin: str
+    ) -> None:
+        """The clearest statement that the header is read: the shapes swap places."""
+        result = _deliver_record(
+            client, unique("run"), record("E-7001"), schema=self.ORDERS, request_origin=origin
+        )
+        assert result.outcome is DeliveryOutcome.FAILED
+        assert result.status_code == 422

@@ -2,8 +2,21 @@
 
 from __future__ import annotations
 
-from schemabridge.domain.identity import IncomingRow, reconcile_identities
+from collections.abc import Sequence
+
+from schemabridge.domain import identity as identity_module
+from schemabridge.domain.identity import IncomingRow, ReconcileResult
 from schemabridge.domain.models import Disposition, IssueType, Provenance
+from schemabridge.domain.target import BUILTIN_SCHEMA
+
+
+def reconcile_identities(rows: Sequence[IncomingRow]) -> ReconcileResult:
+    """Reconcile against the built-in template.
+
+    These cases are about the merge policy itself; `test_schema.py` covers
+    reconciliation keyed on a different schema's identity field.
+    """
+    return identity_module.reconcile_identities(rows, schema=BUILTIN_SCHEMA)
 
 
 def prov(file_id: str, row: int) -> Provenance:

@@ -21,8 +21,15 @@ dependencies = [
   "pandas==3.0.6",
   "openpyxl==3.1.5",
   "jsonschema==4.26.0",
+  # Reading a target schema handed over as a YAML spec. Present transitively via
+  # langchain, but declared because the domain layer imports it directly.
+  "pyyaml==6.0.3",
   # Outbound delivery to the destination API.
   "httpx==0.28.1",
+  # Auth0 access-token validation against its rotating JWKS endpoint.
+  "PyJWT[crypto]==2.11.0",
+  # Optional at runtime (disabled by default), declared for the enablement path.
+  "langfuse==3.14.0",
   # Transitively required by requests (via langchain); declared explicitly so
   # the runtime does not emit a missing-dependency warning on every import.
   "charset-normalizer==3.4.4",
@@ -34,6 +41,7 @@ dev = [
   "pytest-asyncio==1.4.0",
   "ruff==0.16.8",
   "mypy==2.3.1",
+  "types-PyYAML==6.0.12.20250915",
   "uvicorn==0.53.0",
   "python-dotenv==1.2.3",
   "pandas-stubs==3.0.5.260914",
@@ -65,7 +73,7 @@ warn_unreachable = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["langgraph.*", "langchain_openai.*", "langchain_core.*"]
+module = ["langgraph.*", "langchain_openai.*", "langchain_core.*", "jwt", "jwt.*", "langfuse", "langfuse.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

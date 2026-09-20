@@ -18,6 +18,7 @@ integration target offers.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
@@ -34,6 +35,7 @@ from schemabridge.domain.models import (
     DeliveryOutcome,
     DeliveryState,
 )
+from schemabridge.domain.schema import TargetSchema
 from schemabridge.server.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -46,29 +48,66 @@ MAX_ATTEMPTS = 3
 #: wrong, so repeating it unchanged cannot help.
 _RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 
-_DELIVERABLE_FIELDS = (
-    "employeeId",
-    "fullName",
-    "workEmail",
-    "startDate",
-    "endDate",
-    "department",
-    "employmentType",
-)
+#: Carries the contract the destination validates against.
+#:
+#: The *schema itself*, not an id to look up. A run's schema may never have been
+#: saved — detected from the upload, or supplied inline as a spec for one
+#: migration — so there is nothing to look up, and an id-based destination
+#: silently validated those against the built-in template instead.
+#:
+#: Safe here and nowhere else in this codebase: the endpoint already requires a
+#: server-side shared secret, so this cannot come from a browser. It is
+#: deliberately unlike `request_origin`, which is never taken from a header
+#: because a forged one would turn delivery into request forgery.
+SCHEMA_HEADER = "X-Target-Schema"
+RUN_EXPIRY_HEADER = "X-Run-Expires-At"
 
 
-def build_payload(record: CanonicalRecord) -> dict[str, Any]:
+def _encode_schema(schema: TargetSchema) -> str:
+    """The contract as a header value.
+
+    Base64 of compact JSON, because a header must be single-line Latin-1 and a
+    schema's labels and descriptions are neither. Only the parts validation
+    needs, which keeps the header well inside what any proxy will carry.
+    """
+    contract = {
+        "name": schema.name,
+        "fields": [
+            {
+                "name": field.name,
+                "label": field.label,
+                "kind": field.kind.value,
+                "required": field.required,
+                **({"enum_values": list(field.enum_values)} if field.enum_values else {}),
+                **({"not_before": field.not_before} if field.not_before else {}),
+                **({"max_length": field.max_length} if field.max_length else {}),
+            }
+            for field in schema.fields
+        ],
+    }
+    compact = json.dumps(contract, separators=(",", ":"))
+    return base64.b64encode(compact.encode("utf-8")).decode("ascii")
+
+
+def build_payload(record: CanonicalRecord, *, schema: TargetSchema) -> dict[str, Any]:
     """The record as the destination expects it.
 
+    The field list comes from the run's own schema rather than a constant here.
+    A second hardcoded list was the bug waiting to happen: it was checked against
+    nothing, so adding a field to the schema would have silently dropped it from
+    every delivery.
+
     Absent optional fields are omitted rather than sent as null, so the
-    destination sees "not supplied" instead of "explicitly empty".
+    destination sees "not supplied" instead of "explicitly empty". Values the
+    schema does not define are dropped: sending them would invent data the
+    destination never asked for, and its contract forbids extra properties.
     """
     payload: dict[str, Any] = {}
-    for name in _DELIVERABLE_FIELDS:
-        value = record.values.get(name)
+    for spec in schema.fields:
+        value = record.values.get(spec.name)
         if value is None or value == "":
             continue
-        payload[name] = value
+        payload[spec.name] = value
     return payload
 
 
@@ -155,19 +194,25 @@ def deliver_record(
     run_id: str,
     record: CanonicalRecord,
     *,
+    schema: TargetSchema,
     request_origin: str | None = None,
     attempt_number: int = 1,
+    run_expires_at: datetime | None = None,
     demo_headers: dict[str, str] | None = None,
 ) -> DeliveryResult:
     """Send one record, classifying the outcome honestly."""
     settings = get_settings()
-    payload = build_payload(record)
+    payload = build_payload(record, schema=schema)
     key = idempotency_key(run_id, record)
 
     headers = {
         "Authorization": f"Bearer {settings.target_api_secret}",
         "Idempotency-Key": key,
         "Content-Type": "application/json",
+        # The contract itself, compactly: a run's schema may never have been
+        # saved, so there would be nothing for the destination to look up.
+        SCHEMA_HEADER: _encode_schema(schema),
+        **({RUN_EXPIRY_HEADER: run_expires_at.isoformat()} if run_expires_at else {}),
     }
     if demo_headers:
         headers.update(demo_headers)

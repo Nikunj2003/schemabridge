@@ -1,44 +1,59 @@
-"""The target contract the migration maps onto.
+"""The built-in target template.
 
-`schemas/employee.target.schema.json` is the authority for validation. This
-module adds the mapping metadata the engine needs — accepted header spellings
-and semantic value kinds — and cross-checks its field list against the schema at
-import time so the two cannot drift apart silently.
+One schema, shipped so the tool does something useful on first run and so the
+demo has a known shape. It is *a* value of `TargetSchema`, not a privileged one:
+a user can copy it, edit every field, or define something unrelated to employment
+entirely, and the engine treats all of those identically.
+
+Two things here are deliberate rather than leftover:
+
+* **The curated aliases stay**, even though `derive_spellings` generates most of
+  them. Derivation alone matches 9 of the 13 headers in the sample files; the
+  curated list closes `emp_nm`, `doj` and `emp_type`. Keeping both means the
+  shipped template's behaviour is exactly what it was before schemas became data.
+* **`TargetField` stays a `StrEnum`.** It is no longer a type constraint — field
+  names are plain strings now — but it names this template's fields for the code
+  and tests that legitimately talk about the shipped shape, and it is a `str`
+  subclass so `decision.target == TargetField.EMPLOYEE_ID` still holds. It also
+  remains in the checkpointer's allowlist so runs created before the change
+  deserialise.
 """
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
 from enum import StrEnum
-from functools import lru_cache
-from pathlib import Path
 from typing import Any, Final
 
-SCHEMA_PATH: Final = Path(__file__).resolve().parents[2] / "schemas" / "employee.target.schema.json"
+from schemabridge.domain.schema import (
+    TargetFieldSpec,
+    TargetSchema,
+    ValueKind,
+)
 
+__all__ = [
+    "BUILTIN_SCHEMA",
+    "BUILTIN_SCHEMA_ID",
+    "REQUIRED_FIELDS",
+    "TARGET_FIELDS",
+    "TargetField",
+    "TargetFieldSpec",
+    "TargetSchema",
+    "ValueKind",
+    "get_field",
+    "is_target_field",
+    "target_schema",
+]
 
-@lru_cache(maxsize=1)
-def target_schema() -> dict[str, Any]:
-    """The JSON Schema that defines a valid target record."""
-    with SCHEMA_PATH.open(encoding="utf-8") as handle:
-        schema: dict[str, Any] = json.load(handle)
-    return schema
-
-
-class ValueKind(StrEnum):
-    """Semantic shape of a value. Drives type-compatibility checks."""
-
-    IDENTIFIER = "identifier"
-    PERSON_NAME = "person_name"
-    EMAIL = "email"
-    DATE = "date"
-    TEXT = "text"
-    ENUM = "enum"
+#: Stable id, so a run that pinned the built-in template can be recognised as
+#: having used it rather than a user's copy.
+BUILTIN_SCHEMA_ID: Final = "builtin:employee"
 
 
 class TargetField(StrEnum):
-    """Field names in the target schema."""
+    """Field names in the built-in template.
+
+    Not a constraint on what a schema may contain — see the module docstring.
+    """
 
     EMPLOYEE_ID = "employeeId"
     FULL_NAME = "fullName"
@@ -49,206 +64,233 @@ class TargetField(StrEnum):
     EMPLOYMENT_TYPE = "employmentType"
 
 
-@dataclass(frozen=True, slots=True)
-class TargetFieldSpec:
-    """Everything the mapping policy needs to know about one target field."""
+#: Spellings for each permitted employment type. Explicit by design: an unlisted
+#: spelling escalates rather than being fuzzy-matched, because deciding that
+#: "Seasonal Temp" means "contract" is a business call, not a formatting one.
+_EMPLOYMENT_TYPE_ALIASES: Final[dict[str, str]] = {
+    "fulltime": "full_time",
+    "full": "full_time",
+    "permanent": "full_time",
+    "fte": "full_time",
+    "regular": "full_time",
+    "parttime": "part_time",
+    "part": "part_time",
+    "contract": "contract",
+    "contractor": "contract",
+    "contractual": "contract",
+    "temporary": "contract",
+    "temp": "contract",
+    "fixedterm": "contract",
+    "intern": "intern",
+    "internship": "intern",
+    "trainee": "intern",
+    "apprentice": "intern",
+}
 
-    name: TargetField
-    label: str
-    description: str
-    required: bool
-    kind: ValueKind
-    #: Header spellings that unambiguously mean this field. Compared after
-    #: normalisation, so casing, spacing and punctuation need not be listed.
-    aliases: frozenset[str]
-    enum_values: tuple[str, ...] = ()
 
-
-TARGET_FIELDS: Final[tuple[TargetFieldSpec, ...]] = (
-    TargetFieldSpec(
-        name=TargetField.EMPLOYEE_ID,
-        label="Employee ID",
-        description="Unique workforce identifier.",
-        required=True,
-        kind=ValueKind.IDENTIFIER,
-        aliases=frozenset(
-            {
-                "employeeid",
-                "empid",
-                "employeenumber",
-                "empno",
-                "employeecode",
-                "empcode",
-                "staffid",
-                "staffnumber",
-                "personnelnumber",
-                "workerid",
-                "id",
-            }
+BUILTIN_SCHEMA: Final = TargetSchema(
+    schema_id=BUILTIN_SCHEMA_ID,
+    name="Employee",
+    description="Target contract for a migrated employee record.",
+    builtin=True,
+    fields=(
+        TargetFieldSpec(
+            name=TargetField.EMPLOYEE_ID,
+            label="Employee ID",
+            description=(
+                "Unique workforce identifier. Treated as an opaque string so leading "
+                "zeros and prefixes survive migration."
+            ),
+            required=True,
+            kind=ValueKind.IDENTIFIER,
+            # The field rows are keyed on: two files describing the same id are
+            # the same person, which is what makes cross-file merging possible.
+            is_identity=True,
+            aliases=frozenset(
+                {
+                    "employeeid",
+                    "empid",
+                    "employeenumber",
+                    "empno",
+                    "employeecode",
+                    "empcode",
+                    "staffid",
+                    "staffnumber",
+                    "personnelnumber",
+                    "workerid",
+                    "id",
+                }
+            ),
         ),
-    ),
-    TargetFieldSpec(
-        name=TargetField.FULL_NAME,
-        label="Full name",
-        description="Employee's full display name.",
-        required=True,
-        kind=ValueKind.PERSON_NAME,
-        aliases=frozenset(
-            {
-                "fullname",
-                "name",
-                "employeename",
-                "empname",
-                "empnm",
-                "staffname",
-                "displayname",
-                "legalname",
-                "completename",
-            }
+        TargetFieldSpec(
+            name=TargetField.FULL_NAME,
+            label="Full name",
+            description="Employee's full display name as recorded by the client.",
+            required=True,
+            kind=ValueKind.PERSON_NAME,
+            max_length=200,
+            aliases=frozenset(
+                {
+                    "fullname",
+                    "name",
+                    "employeename",
+                    "empname",
+                    "empnm",
+                    "staffname",
+                    "displayname",
+                    "legalname",
+                    "completename",
+                }
+            ),
         ),
-    ),
-    TargetFieldSpec(
-        name=TargetField.WORK_EMAIL,
-        label="Work email",
-        description="Primary work email address.",
-        required=True,
-        kind=ValueKind.EMAIL,
-        aliases=frozenset(
-            {
-                "workemail",
-                "email",
-                "emailaddress",
-                "officeemail",
-                "companyemail",
-                "businessemail",
-                "corporateemail",
-                "workmail",
-            }
+        TargetFieldSpec(
+            name=TargetField.WORK_EMAIL,
+            label="Work email",
+            description="Primary work email address.",
+            required=True,
+            kind=ValueKind.EMAIL,
+            # One address under two ids is either a duplicate person or a typo,
+            # and the schema cannot say which.
+            is_unique=True,
+            aliases=frozenset(
+                {
+                    "workemail",
+                    "email",
+                    "emailaddress",
+                    "officeemail",
+                    "companyemail",
+                    "businessemail",
+                    "corporateemail",
+                    "workmail",
+                }
+            ),
         ),
-    ),
-    TargetFieldSpec(
-        name=TargetField.START_DATE,
-        label="Start date",
-        description="Date employment began.",
-        required=True,
-        kind=ValueKind.DATE,
-        aliases=frozenset(
-            {
-                "startdate",
-                "joindate",
-                "joiningdate",
-                "dateofjoining",
-                "doj",
-                "hiredate",
-                "datehired",
-                "employmentstartdate",
-                "commencementdate",
-            }
+        TargetFieldSpec(
+            name=TargetField.START_DATE,
+            label="Start date",
+            description="Date employment began, as a calendar date.",
+            required=True,
+            kind=ValueKind.DATE,
+            aliases=frozenset(
+                {
+                    "startdate",
+                    "joindate",
+                    "joiningdate",
+                    "dateofjoining",
+                    "doj",
+                    "hiredate",
+                    "datehired",
+                    "employmentstartdate",
+                    "commencementdate",
+                    # Shared with the end date on purpose: a column called
+                    # "Effective Date" could be either, so listing it on both
+                    # makes the spelling index report it as ambiguous and the
+                    # reviewer gets asked. See TargetSchema.spelling_index.
+                    "dates",
+                    "employmentdate",
+                    "effectivedate",
+                    "contractdate",
+                }
+            ),
         ),
-    ),
-    TargetFieldSpec(
-        name=TargetField.END_DATE,
-        label="End date",
-        description="Date employment ended; empty for current employees.",
-        required=False,
-        kind=ValueKind.DATE,
-        aliases=frozenset(
-            {
-                "enddate",
-                "exitdate",
-                "leavingdate",
-                "dateofleaving",
-                "dol",
-                "terminationdate",
-                "lastworkingday",
-                "lastdate",
-                "separationdate",
-                "employmentenddate",
-            }
+        TargetFieldSpec(
+            name=TargetField.END_DATE,
+            label="End date",
+            description=(
+                "Date employment ended. Null for current employees. Must not "
+                "precede the start date."
+            ),
+            required=False,
+            kind=ValueKind.DATE,
+            # Employment cannot end before it began. JSON Schema cannot express a
+            # comparison between two properties, so validation checks it.
+            not_before=TargetField.START_DATE,
+            aliases=frozenset(
+                {
+                    "enddate",
+                    "exitdate",
+                    "leavingdate",
+                    "dateofleaving",
+                    "dol",
+                    "terminationdate",
+                    "lastworkingday",
+                    "lastdate",
+                    "separationdate",
+                    "employmentenddate",
+                    # The other half of the shared-spelling pair above.
+                    "dates",
+                    "employmentdate",
+                    "effectivedate",
+                    "contractdate",
+                }
+            ),
         ),
-    ),
-    TargetFieldSpec(
-        name=TargetField.DEPARTMENT,
-        label="Department",
-        description="Organisational unit.",
-        required=False,
-        kind=ValueKind.TEXT,
-        aliases=frozenset(
-            {
-                "department",
-                "dept",
-                "departmentname",
-                "division",
-                "team",
-                "businessunit",
-                "function",
-                "orgunit",
-            }
+        TargetFieldSpec(
+            name=TargetField.DEPARTMENT,
+            label="Department",
+            description="Organisational unit the employee belongs to.",
+            required=False,
+            kind=ValueKind.TEXT,
+            max_length=120,
+            aliases=frozenset(
+                {
+                    "department",
+                    "dept",
+                    "departmentname",
+                    "division",
+                    "team",
+                    "businessunit",
+                    "function",
+                    "orgunit",
+                }
+            ),
         ),
-    ),
-    TargetFieldSpec(
-        name=TargetField.EMPLOYMENT_TYPE,
-        label="Employment type",
-        description="Nature of the employment contract.",
-        required=False,
-        kind=ValueKind.ENUM,
-        aliases=frozenset(
-            {
-                "employmenttype",
-                "emptype",
-                "employeetype",
-                "contracttype",
-                "workertype",
-                "employmentstatus",
-                "engagementtype",
-            }
+        TargetFieldSpec(
+            name=TargetField.EMPLOYMENT_TYPE,
+            label="Employment type",
+            description="Nature of the employment contract.",
+            required=False,
+            kind=ValueKind.ENUM,
+            enum_values=("full_time", "part_time", "contract", "intern"),
+            value_aliases=_EMPLOYMENT_TYPE_ALIASES,
+            aliases=frozenset(
+                {
+                    "employmenttype",
+                    "emptype",
+                    "employeetype",
+                    "contracttype",
+                    "workertype",
+                    "employmentstatus",
+                    "engagementtype",
+                }
+            ),
         ),
-        enum_values=("full_time", "part_time", "contract", "intern"),
     ),
 )
 
-_FIELD_INDEX: Final[dict[str, TargetFieldSpec]] = {spec.name.value: spec for spec in TARGET_FIELDS}
 
-REQUIRED_FIELDS: Final[tuple[TargetField, ...]] = tuple(
-    spec.name for spec in TARGET_FIELDS if spec.required
-)
+# --- Compatibility surface -------------------------------------------------
+#
+# These read the built-in template. Code that must work on a user's schema takes
+# a `TargetSchema` argument instead; these exist for the places that genuinely
+# mean the shipped shape — the default for a new run, and the tests that pin its
+# behaviour.
+
+TARGET_FIELDS: Final[tuple[TargetFieldSpec, ...]] = BUILTIN_SCHEMA.fields
+
+REQUIRED_FIELDS: Final[tuple[str, ...]] = tuple(sorted(BUILTIN_SCHEMA.required_names))
+
+
+def target_schema() -> dict[str, Any]:
+    """The built-in template's JSON Schema, generated from its fields."""
+    return BUILTIN_SCHEMA.json_schema
 
 
 def get_field(name: str) -> TargetFieldSpec | None:
-    """Look up a field specification by target name."""
-    return _FIELD_INDEX.get(name)
+    """Look up a field in the built-in template."""
+    return BUILTIN_SCHEMA.field(name)
 
 
 def is_target_field(name: str) -> bool:
-    """Whether `name` is a field the target schema defines."""
-    return name in _FIELD_INDEX
-
-
-def _verify_against_schema() -> None:
-    """Fail fast if the registry and the JSON Schema disagree.
-
-    These two definitions have to agree for validation and mapping to describe
-    the same contract, and a mismatch would otherwise show up as a confusing
-    validation error much later.
-    """
-    schema = target_schema()
-    schema_fields = set(schema["properties"])
-    registry_fields = set(_FIELD_INDEX)
-    if schema_fields != registry_fields:
-        missing = schema_fields - registry_fields
-        extra = registry_fields - schema_fields
-        raise RuntimeError(
-            "Target registry does not match the JSON Schema. "
-            f"Missing from registry: {sorted(missing)}. Not in schema: {sorted(extra)}."
-        )
-
-    schema_required = set(schema.get("required", []))
-    registry_required = {field.value for field in REQUIRED_FIELDS}
-    if schema_required != registry_required:
-        raise RuntimeError(
-            "Required fields disagree. "
-            f"Schema: {sorted(schema_required)}. Registry: {sorted(registry_required)}."
-        )
-
-
-_verify_against_schema()
+    """Whether the built-in template defines `name`."""
+    return BUILTIN_SCHEMA.has(name)

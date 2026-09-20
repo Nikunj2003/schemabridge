@@ -12,7 +12,7 @@ from __future__ import annotations
 import secrets
 from datetime import UTC, datetime, timedelta
 
-from fastapi import Request, Response
+from fastapi import HTTPException, Request, Response, status
 
 SESSION_COOKIE = "sb_session"
 _SESSION_BYTES = 32
@@ -61,6 +61,29 @@ def is_secure(request: Request) -> bool:
     """Whether this request arrived over TLS, accounting for a proxy."""
     forwarded = request.headers.get("x-forwarded-proto", "")
     return request.url.scheme == "https" or forwarded.split(",")[0].strip() == "https"
+
+
+def require_same_origin(request: Request) -> None:
+    """Reject a cross-site mutation.
+
+    The session cookie is SameSite=Lax, which covers most of this; checking the
+    Origin header closes the gap for requests that arrive carrying one. Lives beside
+    the cookie rather than in one router because every route that changes state needs
+    the same protection, and a copy per router is a copy that can be forgotten.
+    """
+    origin = request.headers.get("origin")
+    if origin is None:
+        return
+    expected = f"{request.url.scheme}://{request.url.netloc}"
+    forwarded_host = request.headers.get("x-forwarded-host")
+    allowed = {expected}
+    if forwarded_host:
+        allowed.add(f"https://{forwarded_host}")
+        allowed.add(f"http://{forwarded_host}")
+    if origin.rstrip("/") not in {value.rstrip("/") for value in allowed}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Cross-origin request refused."
+        )
 
 
 def session_expiry() -> datetime:

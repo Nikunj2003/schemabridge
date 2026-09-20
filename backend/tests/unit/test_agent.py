@@ -7,15 +7,29 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from schemabridge.agent.llm import default_max_tokens, is_reasoning_model
+from schemabridge.agent import tools as tools_module
+from schemabridge.agent.config import default_max_tokens, is_reasoning_model
 from schemabridge.agent.schemas import MappingProposal, ProposedMapping
-from schemabridge.agent.tools import (
-    check_proposed_mapping,
-    describe_columns,
-    describe_target_schema,
-)
+from schemabridge.agent.tools import CheckedMapping, describe_columns
 from schemabridge.domain.models import ColumnProfile, SourceColumn
 from schemabridge.domain.normalize import detect_value_kinds, normalize_header
+from schemabridge.domain.target import BUILTIN_SCHEMA
+
+
+def check_proposed_mapping(
+    source_column: SourceColumn,
+    column_profile: ColumnProfile | None,
+    target: str,
+    already_taken: set[str],
+) -> CheckedMapping:
+    """Check against the built-in template, which these gate cases are about."""
+    return tools_module.check_proposed_mapping(
+        source_column, column_profile, target, already_taken, schema=BUILTIN_SCHEMA
+    )
+
+
+def describe_target_schema(**kwargs: Any) -> str:
+    return tools_module.describe_target_schema(BUILTIN_SCHEMA, **kwargs)
 
 
 def column(column_id: str, header: str, index: int = 0) -> SourceColumn:
@@ -63,6 +77,62 @@ class TestModelFamilyCompatibility:
     def test_direct_models_do_not_reserve_reasoning_room(self) -> None:
         assert not is_reasoning_model("meta/llama-3.1-70b-instruct")
         assert default_max_tokens("meta/llama-3.1-70b-instruct") < 1500
+
+
+class TestModelConfigurationHasOneHome:
+    """Every LLM-facing value comes from `agent.config`, and nowhere else.
+
+    The point of collecting them was that a parameter defined twice drifts: the
+    prompt tells the model one policy while the verifier enforces another, or a
+    ceiling is raised in one call site and not the other. A test is the only thing
+    that keeps a copy from reappearing, since a duplicate is invisible until it
+    disagrees.
+    """
+
+    def test_the_client_sends_what_the_config_declares(self) -> None:
+        from schemabridge.agent import config, llm
+
+        # Read through the client's own import, so a call site that reintroduced a
+        # literal would fail here rather than passing by coincidence.
+        assert llm.default_max_tokens is config.default_max_tokens
+        assert llm.is_reasoning_model is config.is_reasoning_model
+        # Mapping a column is not a creative task, and a retrying client turns one
+        # budgeted request into three upstream calls.
+        assert config.TEMPERATURE == 0.0
+        assert config.MAX_RETRIES == 0
+
+    def test_no_module_keeps_its_own_prompt(self) -> None:
+        from pathlib import Path
+
+        agent_dir = Path(config_module_file()).parent
+        for module in sorted(agent_dir.glob("*.py")):
+            if module.name == "config.py":
+                continue
+            source = module.read_text(encoding="utf-8")
+            assert "_INSTRUCTIONS = " not in source, (
+                f"{module.name} defines a prompt of its own; prompts belong in config.py "
+                f"next to the policy they encode."
+            )
+
+    def test_both_prompts_state_that_file_content_is_untrusted(self) -> None:
+        """The instruction that pairs with `agent.sanitize`.
+
+        Scrubbing removes a value's structural power; this sentence is what tells
+        the model to read what survives as data. Losing either half quietly weakens
+        the other, so both prompts are checked rather than trusted.
+        """
+        from schemabridge.agent import config
+
+        for prompt in (config.MAPPING_INSTRUCTIONS, config.RULE_INDUCTION_INSTRUCTIONS):
+            assert "untrusted file" in prompt
+            assert "is a value, not a request" in prompt
+
+
+def config_module_file() -> str:
+    from schemabridge.agent import config
+
+    assert config.__file__
+    return config.__file__
 
 
 class TestVerificationGate:
@@ -163,16 +233,17 @@ class TestGracefulDegradation:
 
         monkeypatch.setattr(propose, "reserve_model_request", lambda count=1: 1)
 
-        def explode(_schema: type, **_kwargs: Any) -> Any:
+        def explode(*_args: Any, **_kwargs: Any) -> Any:
             raise TimeoutError("endpoint congested")
 
-        monkeypatch.setattr(propose, "structured_model", explode)
+        monkeypatch.setattr(propose, "invoke_structured", explode)
 
         outcome = propose.propose_unresolved_mappings(
             [column("c1", "Cost Centre Ref")],
             {"c1": profile("c1", "Cost Centre Ref", ["CC-4410"])},
             ["c1"],
             set(),
+            schema=BUILTIN_SCHEMA,
         )
         assert outcome.accepted == ()
         assert outcome.unavailable_reason is not None
@@ -190,18 +261,19 @@ class TestGracefulDegradation:
         monkeypatch.setattr(propose, "reserve_model_request", refuse)
         called = False
 
-        def should_not_run(_schema: type, **_kwargs: Any) -> Any:
+        def should_not_run(*_args: Any, **_kwargs: Any) -> Any:
             nonlocal called
             called = True
             raise AssertionError("no request should be made once the budget is spent")
 
-        monkeypatch.setattr(propose, "structured_model", should_not_run)
+        monkeypatch.setattr(propose, "invoke_structured", should_not_run)
 
         outcome = propose.propose_unresolved_mappings(
             [column("c1", "Cost Centre Ref")],
             {"c1": profile("c1", "Cost Centre Ref", ["CC-4410"])},
             ["c1"],
             set(),
+            schema=BUILTIN_SCHEMA,
         )
         assert not called
         assert outcome.requests_used == 0
@@ -215,6 +287,6 @@ class TestGracefulDegradation:
             raise AssertionError("budget must not be touched when there is nothing to ask")
 
         monkeypatch.setattr(propose, "reserve_model_request", should_not_run)
-        outcome = propose.propose_unresolved_mappings([], {}, [], set())
+        outcome = propose.propose_unresolved_mappings([], {}, [], set(), schema=BUILTIN_SCHEMA)
         assert outcome.requests_used == 0
         assert outcome.unavailable_reason is None

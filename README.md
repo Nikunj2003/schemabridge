@@ -23,23 +23,69 @@ escalate a small well-explained queue where it is not.
 
 ## How it decides
 
-Every mapping lands in one of three outcomes:
+Every mapping lands in one of four outcomes:
 
-1. **Deterministic** — the header matches a known alias, values are
+1. **Rule-applied** — the header matches a known alias, values are
    type-compatible, no other column competes for the same target. Applied
-   automatically.
+   automatically. The rule may be one that shipped, or one this user taught.
 2. **Model-assisted** — an unfamiliar header. A language model proposes
    candidates; a proposal is applied only if independent deterministic checks
    agree. Model confidence alone is never permission.
 3. **Escalated** — two plausible targets, competing columns, a missing
    required field, or a transformation that would change meaning.
+4. **Skipped** — a rule says this column carries nothing worth migrating.
 
 The model proposes. Application code decides. It cannot rewrite rows, invent
 missing values, or reach the destination API.
 
 Records are validated **exactly twice**: once as mapped, then once more after a
 single bounded pass of safe repairs. A record failing both is escalated with
-both error sets, rather than retried indefinitely.
+both error sets, rather than retried indefinitely. A learned rule widens what
+that single pass can fix; it never buys a third attempt.
+
+## The loop that makes a human answer worth keeping
+
+A migration engine that asks the same question every week is not learning
+anything from the most expensive input it receives — a person's judgement. So
+when a question is answered, the model does a second job: it reads the decision
+and drafts the *rule* that would have made the question unnecessary. The person
+approves or declines. Nothing is stored unless they approve.
+
+```
+rules (shipped + yours)  →  unmatched?  →  LLM proposes  →  verifier
+                                                             ├─ accepted → applied
+                                                             └─ refused  → you decide
+                                                                              ↓
+                                                            LLM drafts a rule from it
+                                                                              ↓
+                                                            you approve → next run
+                                                            never asks again
+```
+
+Measured on the sample files: a file whose enum spelling the engine does not
+know produces one blocking question per record. One approved rule takes the same
+file to **zero questions and zero model requests**, and the audit names the rule
+that answered.
+
+Four things keep that safe:
+
+- **A rule is data, never an expression.** Matching is equality on a normalised
+  string. There is no user-supplied regex or predicate, which is also what makes
+  a rule previewable against a real file before it is saved.
+- **A rule belongs to exactly one schema.** So teaching one client's quirk cannot
+  change another client's migration, and the rules page can answer "will this
+  affect the run I am about to start".
+- **A rule cannot resolve an ambiguous column.** A header two fields both claim —
+  `Date`, where the schema has both a start and an end — is what makes that column
+  escalate. Rules are refused there, by hand or by model, because the failure
+  would be silent: every row misdated with nothing saying so.
+- **Hand-written and drafted rules face the same verification.** One function,
+  shared. Otherwise the automated path would be the safe one and the manual path
+  the dangerous one.
+
+The audit marks every step with what did the work — the LLM, the rule engine, or
+you — and a rule that answered carries the rule's own identity, so "no model
+request was made" reads as a result rather than a missing feature.
 
 ## Architecture
 

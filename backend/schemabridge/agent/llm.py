@@ -1,91 +1,172 @@
-"""The model client, configured from measurement rather than defaults.
-
-The model is chosen by environment variable, not baked in. That is deliberate:
-free endpoints fluctuate badly. The same Nemotron endpoint answered a bare ping
-in 17s one hour and 75s the next, while gpt-oss answered the same
-schema-constrained request in 11s. Neither is reliably the faster choice, so
-switching has to be a one-line change with no code edit.
-
-Different model families expose the same idea under different names, and an
-endpoint ignores parameters it does not recognise. Rather than branch on the
-model id, every known switch is sent together — with per-family output ceilings,
-because that is the one setting where a single value does not suit both.
-
-Measured behaviour that drove these numbers:
-
-| Setting                          | Effect                                    |
-| -------------------------------- | ----------------------------------------- |
-| gpt-oss at 300 output tokens     | returned only reasoning, no answer at all  |
-| gpt-oss at default effort        | 26s; at low effort, 11s, same answer       |
-| Nemotron with reasoning enabled  | exceeded 45s and returned nothing usable   |
-| Nemotron with reasoning_budget 0 | answered in about 30s                      |
-"""
+"""The model client and its rate-limited, observed invocation boundary."""
 
 from __future__ import annotations
 
-from typing import Any, Final
+import logging
+import time
+from collections.abc import Callable
+from datetime import datetime
+from typing import Any
 
 from langchain_openai import ChatOpenAI
+from pydantic import SecretStr
 
+from schemabridge.agent.config import (
+    EXTRA_BODY,
+    MAX_RETRIES,
+    STRUCTURED_OUTPUT_METHOD,
+    STRUCTURED_OUTPUT_STRICT,
+    TEMPERATURE,
+    default_max_tokens,
+    is_reasoning_model,
+    model_id,
+)
+from schemabridge.server import model_exchanges, model_rate_limit, observability
 from schemabridge.server.config import get_settings
 
-#: Sent on every request. `reasoning_effort` is honoured by the gpt-oss family,
-#: `reasoning_budget` and `enable_thinking` by the Nemotron family. Sending all
-#: three keeps one adapter working across both without inspecting the model id.
-_EXTRA_BODY: Final[dict[str, Any]] = {
-    "reasoning_effort": "low",
-    "reasoning_budget": 0,
-    "chat_template_kwargs": {"enable_thinking": False},
-}
+logger = logging.getLogger(__name__)
 
-#: Output ceilings differ by family, and this is the one place a shared value
-#: fails. A reasoning model emits its thinking before the answer, so too small a
-#: ceiling truncates mid-thought and yields nothing; a non-reasoning model just
-#: wastes budget on headroom it never uses.
-_REASONING_MAX_TOKENS: Final = 1500
-_DIRECT_MAX_TOKENS: Final = 600
-
-#: Model families that spend output tokens on visible reasoning first.
-_REASONING_FAMILIES: Final = ("gpt-oss", "deepseek", "qwen3", "nemotron-3.5", "glm")
-
-
-def is_reasoning_model(model_id: str) -> bool:
-    """Whether this model spends output tokens thinking before answering."""
-    lowered = model_id.lower()
-    return any(family in lowered for family in _REASONING_FAMILIES)
-
-
-def default_max_tokens(model_id: str) -> int:
-    """Output ceiling appropriate to the model's family."""
-    return _REASONING_MAX_TOKENS if is_reasoning_model(model_id) else _DIRECT_MAX_TOKENS
+__all__ = [
+    "build_model",
+    "default_max_tokens",
+    "invoke_structured",
+    "is_reasoning_model",
+    "structured_model",
+]
 
 
 def build_model(*, max_tokens: int | None = None) -> ChatOpenAI:
-    """A chat model pointed at whichever endpoint is configured."""
     settings = get_settings()
-    model_id = settings.nvidia_model
+    model = model_id()
     return ChatOpenAI(
-        model=model_id,
+        model=model,
         base_url=settings.nvidia_base_url,
-        api_key=settings.require_model_key(),
-        temperature=0,  # Mapping a column to a field is not a creative task.
-        max_tokens=max_tokens or default_max_tokens(model_id),
+        api_key=SecretStr(settings.require_model_key()),
+        temperature=TEMPERATURE,
+        max_completion_tokens=max_tokens or default_max_tokens(model),
         timeout=settings.model_timeout_seconds,
-        # Without this the client retries transparently, turning one logical
-        # request into three upstream calls and quietly outspending the budget.
-        max_retries=0,
-        extra_body=_EXTRA_BODY,
+        # Retry ownership belongs below so each physical request observes the
+        # shared 45 RPM gate and persists its outcome.
+        max_retries=MAX_RETRIES,
+        extra_body=EXTRA_BODY,
     )
 
 
 def structured_model(schema: type, *, max_tokens: int | None = None) -> Any:
-    """A model returning `schema`, using the strategy measured as fastest.
-
-    Of the four strategies available, `json_schema` with `strict=True` was the
-    only one both fast and reliable. The default took twice as long, `json_mode`
-    timed out, and `function_calling` returned a null target *without raising* —
-    which would have written nulls into mappings rather than failing visibly.
-    """
     return build_model(max_tokens=max_tokens).with_structured_output(
-        schema, method="json_schema", strict=True
+        schema, method=STRUCTURED_OUTPUT_METHOD, strict=STRUCTURED_OUTPUT_STRICT
     )
+
+
+def _serialise(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if isinstance(value, tuple):
+        return [_serialise(item) for item in value]
+    if isinstance(value, list):
+        return [_serialise(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _serialise(item) for key, item in value.items()}
+    return value
+
+
+def _record(write: Callable[[], None]) -> None:
+    """Journal an attempt without letting bookkeeping sink a working migration.
+
+    The evidence trail is valuable but never authoritative for the run itself: a
+    Mongo hiccup must not turn a successful model call into a failed one.
+    """
+    try:
+        write()
+    except Exception as error:
+        logger.warning("could not record a model exchange: %s", type(error).__name__)
+
+
+def _retryable(error: Exception) -> bool:
+    name = type(error).__name__.lower()
+    return any(marker in name for marker in ("rate", "timeout", "connection", "server", "apierror"))
+
+
+def invoke_structured(
+    schema: type,
+    messages: list[tuple[str, str]],
+    *,
+    operation: str,
+    run_id: str,
+    owner_id: str,
+    workspace_kind: str,
+    expires_at: datetime,
+) -> Any:
+    """Call a constrained model after a shared rate reservation and record it.
+
+    The same logical product budget is charged by the caller once. Retried provider
+    attempts are recorded here but do not repeatedly consume that product budget.
+    """
+    settings = get_settings()
+    exchange_id = model_exchanges.new_exchange_id()
+    started = time.monotonic()
+    request = _serialise(messages)
+    # Written before the outbound call, so an interrupted request still leaves
+    # evidence that it was made.
+    _record(
+        lambda: model_exchanges.start(
+            exchange_id=exchange_id,
+            run_id=run_id,
+            owner_id=owner_id,
+            workspace_kind=workspace_kind,
+            expires_at=expires_at,
+            operation=operation,
+            model=model_id(),
+            request=request,
+        )
+    )
+    attempts = 0
+    error: Exception | None = None
+    for attempts in range(1, settings.nvidia_retry_attempts + 1):
+        try:
+            model_rate_limit.reserve_slot()
+            proposal = structured_model(schema).invoke(messages)
+            elapsed = int((time.monotonic() - started) * 1000)
+            response = _serialise(proposal)
+
+            # Bound as defaults rather than captured: a late-binding closure
+            # would read whatever the loop variables held by the time it ran.
+            def _finish(
+                answer: Any = response, attempt: int = attempts, took: int = elapsed
+            ) -> None:
+                model_exchanges.finish(
+                    exchange_id, response=answer, attempts=attempt, latency_ms=took
+                )
+
+            _record(_finish)
+            observability.export_generation(
+                {
+                    "_id": exchange_id,
+                    "run_id": run_id,
+                    "owner_id": owner_id,
+                    "operation": operation,
+                    "model": model_id(),
+                    "request": request,
+                    "response": response,
+                    "status": "completed",
+                    "attempts": attempts,
+                }
+            )
+            return proposal
+        except Exception as caught:
+            error = caught
+            if not _retryable(caught) or attempts >= settings.nvidia_retry_attempts:
+                break
+            time.sleep(min(2**attempts, 8))
+    elapsed = int((time.monotonic() - started) * 1000)
+    _record(
+        lambda: model_exchanges.fail(
+            exchange_id,
+            error=type(error).__name__ if error else "UnknownModelError",
+            attempts=attempts,
+            latency_ms=elapsed,
+        )
+    )
+    if error is not None:
+        raise error
+    raise RuntimeError("Model invocation did not start.")

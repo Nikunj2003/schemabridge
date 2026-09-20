@@ -12,7 +12,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from schemabridge.domain.target import TargetField, ValueKind
+from schemabridge.domain.target import ValueKind
 
 
 def utc_now() -> datetime:
@@ -104,6 +104,10 @@ class SourceRow(Frozen):
 class MappingBasis(StrEnum):
     EXACT_NAME = "exact_name"
     ALIAS = "alias"
+    #: A rule the reviewer approved after an earlier migration asked them. Kept
+    #: distinct from ALIAS so the trail can say the engine knew this because it was
+    #: taught, rather than because it shipped knowing it.
+    LEARNED_ALIAS = "learned_alias"
     MODEL_ASSISTED = "model_assisted"
     HUMAN_CORRECTION = "human_correction"
     UNMAPPED = "unmapped"
@@ -122,10 +126,16 @@ class Actor(StrEnum):
 
 
 class MappingCandidate(Frozen):
-    """One candidate pairing of a source column with a target field."""
+    """One candidate pairing of a source column with a target field.
+
+    `target` is a plain field name rather than an enum member: the target schema
+    is chosen per run, so the set of valid names is not known until then. The
+    built-in template's names are still available as `TargetField` constants, and
+    since that is a `StrEnum` a comparison against one keeps working.
+    """
 
     column_id: str
-    target: TargetField
+    target: str
     basis: MappingBasis
     #: Human-readable evidence. Deliberately not a single score: the reviewer
     #: needs to see why, and a model's self-reported confidence is not a
@@ -136,7 +146,8 @@ class MappingCandidate(Frozen):
 
 class MappingDecision(Frozen):
     column_id: str
-    target: TargetField | None = None
+    #: A target field name from the run's schema, or None when nothing fits.
+    target: str | None = None
     outcome: MappingOutcome
     basis: MappingBasis
     evidence: tuple[str, ...] = ()
@@ -238,7 +249,8 @@ class IssueOption(Frozen):
     id: str
     label: str
     detail: str
-    target: TargetField | None = None
+    #: The target field this option would map to, when that is what it decides.
+    target: str | None = None
     value: str | None = None
 
 
@@ -315,6 +327,16 @@ class DeliveryIntent(Frozen):
 # ---------------------------------------------------------------------------
 
 
+class EventExecutionBasis(StrEnum):
+    """How the recorded action was carried out, independently of its actor."""
+
+    DETERMINISTIC = "deterministic"
+    MODEL_ASSISTED = "model_assisted"
+    HUMAN = "human"
+    #: Used for audit events written before execution provenance was recorded.
+    UNKNOWN = "unknown"
+
+
 class AuditEvent(Frozen):
     """One recorded decision. Doubles as the UI's activity feed."""
 
@@ -322,6 +344,8 @@ class AuditEvent(Frozen):
     seq: int
     at: datetime = Field(default_factory=utc_now)
     actor: Actor
+    #: How the action was executed. An agent actor can use either policy or a model.
+    execution_basis: EventExecutionBasis = EventExecutionBasis.UNKNOWN
     action: str
     #: Why this happened: the policy rule, or the reviewer's choice.
     reason: str

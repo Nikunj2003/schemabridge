@@ -9,7 +9,9 @@ what the audit trail exists to prevent.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Annotated, Any, TypedDict
 
 from schemabridge.domain.models import (
@@ -24,6 +26,10 @@ from schemabridge.domain.models import (
     SourceFile,
     SourceRow,
 )
+from schemabridge.domain.rules import EMPTY_RULES, ProposedRule, Rule, RuleSet
+from schemabridge.domain.schema import TargetSchema
+
+logger = logging.getLogger(__name__)
 
 
 def append[T](existing: Sequence[T] | None, incoming: Sequence[T] | T | None) -> tuple[T, ...]:
@@ -96,8 +102,21 @@ class MigrationState(TypedDict, total=False):
 
     # --- Identity and configuration -------------------------------------
     run_id: str
-    owner_session_id: str
+    #: Server-derived opaque workspace id; never a browser-provided owner value.
+    owner_id: str
+    workspace_kind: str
+    #: Immutable retention deadline captured when the run starts.
+    run_expires_at: datetime
     policy_version: str
+    #: The contract this run maps onto, snapshotted at creation rather than
+    #: referenced by id. Editing a saved schema must not change what a paused run
+    #: is validated against: a migration's contract is fixed when it starts.
+    target_schema: TargetSchema
+    #: The rules in force, snapshotted for the same reason and with more force:
+    #: this run may itself add rules partway through, and a run that re-read the
+    #: store on resume could apply a rule to its second half that its first half
+    #: never saw. The trail would then describe two different engines.
+    rules: tuple[Rule, ...]
 
     # --- Source data ----------------------------------------------------
     files: tuple[SourceFile, ...]
@@ -112,6 +131,14 @@ class MigrationState(TypedDict, total=False):
     unresolved_columns: tuple[str, ...]
     #: Reviewer choices, keyed by issue id, so a resume knows what was decided.
     resolutions: dict[str, Any]
+    #: Rules the model drafted from decisions this reviewer made, awaiting their
+    #: approval. Append-only: a proposal dismissed in one pass must not reappear
+    #: in the next, and the reviewer's own list must not be rewritten under them.
+    proposed_rules: Annotated[tuple[ProposedRule, ...], append]
+    #: Issue ids induction has already considered. The node that drafts rules sits
+    #: on a path the graph re-enters once per decision, so without this it would
+    #: spend a model request every time the reviewer answers anything.
+    induced_for: tuple[str, ...]
 
     # --- Results --------------------------------------------------------
     records: Annotated[tuple[CanonicalRecord, ...], replace_records]
@@ -138,3 +165,59 @@ def next_sequence(state: MigrationState) -> int:
     """The next audit sequence number for this run."""
     events = state.get("events", ())
     return (max((event.seq for event in events), default=0)) + 1
+
+
+def run_schema(state: MigrationState) -> TargetSchema:
+    """The contract this run maps onto.
+
+    Falls back to the built-in template for a run checkpointed before schemas
+    became part of the state, so an in-flight migration is not stranded by the
+    upgrade. A checkpoint that round-tripped through a serializer without the
+    type registered comes back as a plain dict, so that case is revived too
+    rather than crashing on attribute access.
+    """
+    from schemabridge.domain.target import BUILTIN_SCHEMA
+
+    # Typed as Any deliberately: the annotation promises a TargetSchema, but a
+    # checkpoint written before this field existed has nothing, and one that
+    # round-tripped through a serializer lacking the type comes back as a plain
+    # dict. Both are real states to survive, so the check is a runtime one.
+    stored: Any = state.get("target_schema")
+    if isinstance(stored, TargetSchema):
+        return stored
+    if isinstance(stored, dict):
+        try:
+            return TargetSchema.model_validate(stored)
+        except Exception:
+            return BUILTIN_SCHEMA
+    return BUILTIN_SCHEMA
+
+
+def run_rules(state: MigrationState) -> RuleSet:
+    """The rules in force for this run, layered and ready to consult.
+
+    Built from the snapshot on the state, never from the database: a paused run
+    resumed tomorrow must decide exactly as it would have decided today, and the
+    snapshot is the only thing that can promise that.
+
+    Tolerates both a checkpoint written before rules existed and one whose entries
+    round-tripped as plain dicts, for the same reason `run_schema` does — an
+    upgrade must not strand an in-flight migration.
+    """
+    stored: Any = state.get("rules")
+    if not stored:
+        return EMPTY_RULES
+    revived: list[Rule] = []
+    for entry in stored:
+        if isinstance(entry, Rule):
+            revived.append(entry)
+            continue
+        if isinstance(entry, dict):
+            try:
+                revived.append(Rule.model_validate(entry))
+            except Exception as error:
+                # One unreadable rule must not cost the run the rest of them, but
+                # it is worth a line: a rule silently dropped looks to the reviewer
+                # like a rule that did not fire.
+                logger.warning("skipping unreadable rule: %s", type(error).__name__)
+    return RuleSet(tuple(revived), schema_id=run_schema(state).schema_id)

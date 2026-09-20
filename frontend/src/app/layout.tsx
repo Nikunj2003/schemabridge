@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Inter, Space_Grotesk } from "next/font/google";
+import { WorkspaceProvider } from "@/components/auth/workspace-provider";
 import { ThemeProvider } from "@/components/theme-provider";
 import "./globals.css";
 
@@ -32,7 +33,7 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body className={`${inter.variable} ${spaceGrotesk.variable}`}>
-        <ThemeProvider>{children}</ThemeProvider>
+        <ThemeProvider><WorkspaceProvider>{children}</WorkspaceProvider></ThemeProvider>
       </body>
     </html>
   );

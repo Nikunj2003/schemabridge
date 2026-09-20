@@ -15,12 +15,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from schemabridge.agent.config import MAX_PROMPT_SAMPLES
 from schemabridge.agent.sanitize import safe_value
 from schemabridge.domain.models import ColumnProfile, SourceColumn
 from schemabridge.domain.normalize import detect_value_kinds
 from schemabridge.domain.schema import TargetSchema, ValueKind, kinds_compatible
-
-_MAX_SAMPLES = 3
 
 
 def describe_target_schema(schema: TargetSchema, *, exclude: set[str] | None = None) -> str:
@@ -83,7 +82,7 @@ def describe_columns(columns: list[SourceColumn], profiles: dict[str, ColumnProf
             parts.append(f"shape={kinds[0].value if kinds else 'unknown'}")
             parts.append(f"filled={profile.non_empty_count}/{profile.total_count}")
             parts.append(f"distinct={profile.distinct_count}")
-            samples = ", ".join(safe_value(s) for s in profile.samples[:_MAX_SAMPLES])
+            samples = ", ".join(safe_value(s) for s in profile.samples[:MAX_PROMPT_SAMPLES])
             if samples:
                 parts.append(f"examples=[{samples}]")
         lines.append(" ".join(parts))

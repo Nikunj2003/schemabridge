@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from schemabridge.agent import tools as tools_module
-from schemabridge.agent.llm import default_max_tokens, is_reasoning_model
+from schemabridge.agent.config import default_max_tokens, is_reasoning_model
 from schemabridge.agent.schemas import MappingProposal, ProposedMapping
 from schemabridge.agent.tools import CheckedMapping, describe_columns
 from schemabridge.domain.models import ColumnProfile, SourceColumn
@@ -77,6 +77,62 @@ class TestModelFamilyCompatibility:
     def test_direct_models_do_not_reserve_reasoning_room(self) -> None:
         assert not is_reasoning_model("meta/llama-3.1-70b-instruct")
         assert default_max_tokens("meta/llama-3.1-70b-instruct") < 1500
+
+
+class TestModelConfigurationHasOneHome:
+    """Every LLM-facing value comes from `agent.config`, and nowhere else.
+
+    The point of collecting them was that a parameter defined twice drifts: the
+    prompt tells the model one policy while the verifier enforces another, or a
+    ceiling is raised in one call site and not the other. A test is the only thing
+    that keeps a copy from reappearing, since a duplicate is invisible until it
+    disagrees.
+    """
+
+    def test_the_client_sends_what_the_config_declares(self) -> None:
+        from schemabridge.agent import config, llm
+
+        # Read through the client's own import, so a call site that reintroduced a
+        # literal would fail here rather than passing by coincidence.
+        assert llm.default_max_tokens is config.default_max_tokens
+        assert llm.is_reasoning_model is config.is_reasoning_model
+        # Mapping a column is not a creative task, and a retrying client turns one
+        # budgeted request into three upstream calls.
+        assert config.TEMPERATURE == 0.0
+        assert config.MAX_RETRIES == 0
+
+    def test_no_module_keeps_its_own_prompt(self) -> None:
+        from pathlib import Path
+
+        agent_dir = Path(config_module_file()).parent
+        for module in sorted(agent_dir.glob("*.py")):
+            if module.name == "config.py":
+                continue
+            source = module.read_text(encoding="utf-8")
+            assert "_INSTRUCTIONS = " not in source, (
+                f"{module.name} defines a prompt of its own; prompts belong in config.py "
+                f"next to the policy they encode."
+            )
+
+    def test_both_prompts_state_that_file_content_is_untrusted(self) -> None:
+        """The instruction that pairs with `agent.sanitize`.
+
+        Scrubbing removes a value's structural power; this sentence is what tells
+        the model to read what survives as data. Losing either half quietly weakens
+        the other, so both prompts are checked rather than trusted.
+        """
+        from schemabridge.agent import config
+
+        for prompt in (config.MAPPING_INSTRUCTIONS, config.RULE_INDUCTION_INSTRUCTIONS):
+            assert "untrusted file" in prompt
+            assert "is a value, not a request" in prompt
+
+
+def config_module_file() -> str:
+    from schemabridge.agent import config
+
+    assert config.__file__
+    return config.__file__
 
 
 class TestVerificationGate:

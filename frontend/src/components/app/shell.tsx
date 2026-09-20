@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useId, useState } from "react";
+import { AuthorStrip } from "@/components/brand/author";
 import { Wordmark } from "@/components/brand/logo";
 import { useMigrationUsage } from "@/components/app/migration-usage";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -35,49 +36,57 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     // h-dvh with overflow-hidden: the page itself never scrolls, so the chrome
-    // cannot travel off the top of the viewport.
-    <div className="flex h-dvh overflow-hidden bg-canvas">
-      <aside className="hidden w-[228px] shrink-0 flex-col border-r border-line bg-surface md:flex">
-        {/* Same height and bottom border as the header, so the rule runs
-            unbroken across the full width instead of stopping at the rail. */}
-        <div className="flex h-14 shrink-0 items-center border-b border-line px-4">
-          <Link href="/app" className="rounded-md">
-            <Wordmark />
-          </Link>
+    // cannot travel off the top of the viewport. The rail and the work area sit in
+    // a nested row so the strip below them can run the full width, the way the
+    // header's rule already does.
+    <div className="flex h-dvh flex-col overflow-hidden bg-canvas">
+      <div className="flex min-h-0 flex-1">
+        <aside className="hidden w-[228px] shrink-0 flex-col border-r border-line bg-surface md:flex">
+          {/* Same height and bottom border as the header, so the rule runs
+              unbroken across the full width instead of stopping at the rail. */}
+          <div className="flex h-14 shrink-0 items-center border-b border-line px-4">
+            <Link href="/app" className="rounded-md">
+              <Wordmark />
+            </Link>
+          </div>
+
+          <nav className="scroll-area flex-1 px-2.5 py-3" aria-label="Main">
+            <NavGroup label="Workspace" items={WORKSPACE} pathname={pathname} />
+            <NavGroup label="Reference" items={REFERENCE} pathname={pathname} className="mt-5" />
+          </nav>
+
+          <div className="shrink-0 border-t border-line p-2.5">
+            <AllowanceMeter usage={usage} error={usageError} />
+          </div>
+        </aside>
+
+        <div className="flex min-w-0 flex-1 flex-col">
+          <header className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-surface px-4 sm:px-6">
+            <Link href="/app" className="md:hidden">
+              <Wordmark />
+            </Link>
+            <div className="flex-1" />
+            <ThemeToggle />
+            <AccountMenu open={menuOpen} setOpen={setMenuOpen} />
+          </header>
+
+          {/* Phone navigation: the rail becomes a strip, still outside the scroll. */}
+          <nav
+            className="flex shrink-0 gap-1 overflow-x-auto border-b border-line bg-surface px-2 py-1.5 md:hidden"
+            aria-label="Main"
+          >
+            {[...WORKSPACE, ...REFERENCE].map((item) => (
+              <NavLink key={item.href} item={item} pathname={pathname} compact />
+            ))}
+          </nav>
+
+          <main className="scroll-area flex-1">{children}</main>
         </div>
-
-        <nav className="scroll-area flex-1 px-2.5 py-3" aria-label="Main">
-          <NavGroup label="Workspace" items={WORKSPACE} pathname={pathname} />
-          <NavGroup label="Reference" items={REFERENCE} pathname={pathname} className="mt-5" />
-        </nav>
-
-        <div className="shrink-0 border-t border-line p-2.5">
-          <AllowanceMeter usage={usage} error={usageError} />
-        </div>
-      </aside>
-
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-surface px-4 sm:px-6">
-          <Link href="/app" className="md:hidden">
-            <Wordmark />
-          </Link>
-          <div className="flex-1" />
-          <ThemeToggle />
-          <AccountMenu open={menuOpen} setOpen={setMenuOpen} />
-        </header>
-
-        {/* Phone navigation: the rail becomes a strip, still outside the scroll. */}
-        <nav
-          className="flex shrink-0 gap-1 overflow-x-auto border-b border-line bg-surface px-2 py-1.5 md:hidden"
-          aria-label="Main"
-        >
-          {[...WORKSPACE, ...REFERENCE].map((item) => (
-            <NavLink key={item.href} item={item} pathname={pathname} compact />
-          ))}
-        </nav>
-
-        <main className="scroll-area flex-1">{children}</main>
       </div>
+
+      {/* Outside the scroll container, like the header and the rail: the frame
+          stays whole while only the work area moves. */}
+      <AuthorStrip />
     </div>
   );
 }

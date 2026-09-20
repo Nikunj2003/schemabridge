@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { AuthorCredit } from "@/components/brand/author";
 import { Wordmark } from "@/components/brand/logo";
 import { HexGridBackground } from "@/components/marketing/hex-grid-background";
 import { MergeFigure } from "@/components/marketing/merge-figure";
@@ -143,6 +144,14 @@ export default function LandingPage() {
             </a>
             <Link href="/signin" className="marketing-nav-link">Sign in</Link>
             <ThemeToggle />
+          </div>
+        </div>
+        {/* Attribution on its own row under a divider. Folding it into the row
+            above would have it competing with the product links for the same
+            corner, and it is a different kind of statement. */}
+        <div className="border-t border-line">
+          <div className="marketing-frame py-4">
+            <AuthorCredit />
           </div>
         </div>
       </footer>

@@ -8,10 +8,12 @@ persisted.
 from __future__ import annotations
 
 import os
+import secrets
 import socket
 import threading
 import time
 from collections.abc import Iterator
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +77,32 @@ def origin() -> Iterator[str]:
     thread.join(timeout=10)
     os.environ.pop("PORT", None)
     get_settings.cache_clear()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _own_workspace() -> Iterator[None]:
+    """Run the suite in a workspace of its own.
+
+    Unauthenticated requests deliberately share one guest workspace with a finite
+    daily allowance, so left alone this suite spends the real guests' quota and
+    then fails on 429 — for a reason that has nothing to do with the code under
+    test. Overriding the anonymous principal keeps the isolation the tests assert
+    about while drawing on an allowance nobody else uses.
+    """
+    from schemabridge.server import auth
+
+    original = auth.anonymous_principal
+    suite = auth.WorkspacePrincipal(
+        owner_id=f"test:{secrets.token_hex(8)}",
+        kind="anonymous",
+        daily_run_limit=10_000,
+        retention=timedelta(hours=2),
+    )
+    auth.anonymous_principal = lambda: suite  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        auth.anonymous_principal = original  # type: ignore[assignment]
 
 
 @pytest.fixture

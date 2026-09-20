@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import itertools
 import re
+from collections.abc import Sequence
 from enum import StrEnum
 from functools import cached_property
 from typing import Any, Final
@@ -47,6 +48,43 @@ class ValueKind(StrEnum):
     DATE = "date"
     TEXT = "text"
     ENUM = "enum"
+
+
+#: Value kinds acceptable as evidence for each target kind.
+#:
+#: One table, here, because two places need the same answer: the deterministic
+#: mapping gates and the verifier that judges a model's proposal. Held beside
+#: `ValueKind` rather than in either consumer, since a copy in each is a rule that
+#: can silently disagree with itself — and the two would disagree about whether a
+#: column may be mapped, which is the most consequential question in the engine.
+COMPATIBLE_KINDS: Final[dict[ValueKind, frozenset[ValueKind]]] = {
+    ValueKind.IDENTIFIER: frozenset({ValueKind.IDENTIFIER, ValueKind.TEXT}),
+    ValueKind.PERSON_NAME: frozenset({ValueKind.PERSON_NAME, ValueKind.TEXT}),
+    ValueKind.EMAIL: frozenset({ValueKind.EMAIL}),
+    ValueKind.DATE: frozenset({ValueKind.DATE}),
+    ValueKind.TEXT: frozenset(
+        {ValueKind.TEXT, ValueKind.ENUM, ValueKind.PERSON_NAME, ValueKind.IDENTIFIER}
+    ),
+    ValueKind.ENUM: frozenset({ValueKind.ENUM, ValueKind.TEXT}),
+}
+
+
+def kinds_compatible(target_kind: ValueKind, kinds: Sequence[ValueKind]) -> bool:
+    """Whether observed value kinds support mapping onto `target_kind`.
+
+    No observed kinds means compatible: there are no values to contradict the
+    header, which is a different situation from values that disagree with it.
+
+    An unrecognised target kind is treated as compatible with *nothing*. The
+    lookup is deliberately not a bare index: an unknown kind reaching here means
+    the closed set grew without this table growing with it, and defaulting to
+    "compatible" would let that mistake silently map a column onto a field whose
+    shape nobody checked.
+    """
+    if not kinds:
+        return True
+    allowed = COMPATIBLE_KINDS.get(target_kind, frozenset())
+    return any(kind in allowed for kind in kinds)
 
 
 #: A field name has to survive being a JSON key, a CSV header and a Python dict

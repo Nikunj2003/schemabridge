@@ -29,15 +29,18 @@ from typing import Annotated, Any
 from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile, status
 from starlette.concurrency import run_in_threadpool
 
+from schemabridge.api import rule_routes
 from schemabridge.api.views import RunView, build_run_view, target_schema_view
 from schemabridge.domain.infer import infer_schema
 from schemabridge.domain.models import (
+    TERMINAL_PHASES,
     ColumnProfile,
     RunPhase,
     SourceColumn,
     SourceFile,
     SourceRow,
 )
+from schemabridge.domain.rules import Rule
 from schemabridge.domain.schema import TargetSchema
 from schemabridge.domain.spec import SpecError, parse_spec
 from schemabridge.domain.target import BUILTIN_SCHEMA
@@ -47,10 +50,11 @@ from schemabridge.ingest.limits import INGEST_LIMITS
 from schemabridge.ingest.profile import profile_columns
 from schemabridge.ingest.xlsx_source import parse_xlsx
 from schemabridge.server import migration_quota
+from schemabridge.server import rules as rule_store
 from schemabridge.server import runs as registry
 from schemabridge.server import schemas as schema_store
 from schemabridge.server.budget import usage_today
-from schemabridge.server.sessions import ensure_session, read_session
+from schemabridge.server.sessions import ensure_session, read_session, require_same_origin
 
 logger = logging.getLogger(__name__)
 
@@ -70,27 +74,6 @@ def _owned_run(run_id: str, request: Request) -> registry.RunRecord:
     if record is None or not session_id or record.owner_session_id != session_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such run.")
     return record
-
-
-def _same_origin(request: Request) -> None:
-    """Reject cross-site mutations.
-
-    The session cookie is SameSite=Lax, which covers most of this; checking the
-    Origin header closes the gap for requests that arrive with one.
-    """
-    origin = request.headers.get("origin")
-    if origin is None:
-        return
-    expected = f"{request.url.scheme}://{request.url.netloc}"
-    forwarded_host = request.headers.get("x-forwarded-host")
-    allowed = {expected}
-    if forwarded_host:
-        allowed.add(f"https://{forwarded_host}")
-        allowed.add(f"http://{forwarded_host}")
-    if origin.rstrip("/") not in {value.rstrip("/") for value in allowed}:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Cross-origin request refused."
-        )
 
 
 def _request_origin(request: Request) -> str:
@@ -188,6 +171,21 @@ def read_migration_usage(request: Request, response: Response) -> dict[str, str 
     }
 
 
+def _run_rules(session_id: str, schema: TargetSchema) -> tuple[Rule, ...]:
+    """The rules this run should carry, or none if the store is unreachable.
+
+    A rule store outage degrades the run to the shipped engine rather than refusing
+    to start: the migration still works, it just knows less, and the trail shows no
+    learned marks so nobody is misled about why.
+    """
+    try:
+        resolved = rule_store.resolve_rules(session_id, schema)
+    except Exception as error:
+        logger.warning("rule store unavailable: %s", type(error).__name__)
+        return ()
+    return resolved.rules
+
+
 @router.post("/runs", status_code=status.HTTP_201_CREATED)
 async def create_run(
     request: Request,
@@ -203,7 +201,7 @@ async def create_run(
     `schema_spec` supplies a JSON or YAML spec inline for this run only, and takes
     precedence when both are given.
     """
-    _same_origin(request)
+    require_same_origin(request)
     session_id = ensure_session(request, response)
 
     if not files:
@@ -314,6 +312,13 @@ async def create_run(
         "deliveries": (),
         "resolutions": {},
         "model_requests": 0,
+        # Snapshotted for the same reason as the schema, and with more force: this
+        # run may add rules to the store partway through, and a run that re-read the
+        # store on resume would apply rules to its second half that its first half
+        # never saw.
+        "rules": _run_rules(session_id, schema),
+        "proposed_rules": (),
+        "induced_for": (),
         "phase": RunPhase.INGESTED,
         "request_origin": _request_origin(request),
         "demo_delivery": _DEMO_DELIVERY,
@@ -346,10 +351,37 @@ def read_run(run_id: str, request: Request, since: int = 0) -> RunView:
     )
 
 
+def _record_rule_hits(state: dict[str, Any]) -> None:
+    """Credit the rules that answered, once the run has finished.
+
+    Counted from the run's own mapping decisions rather than from the `RuleSet`,
+    because the set that did the counting lived inside a graph node in another
+    process and is gone by now. Deliberately not written during mapping: a hit is a
+    display number, and a database round trip per column would put a network call
+    between a column and its answer.
+
+    Best effort, and swallowed: losing a count must never turn a finished migration
+    into an error.
+    """
+    phase = state.get("phase")
+    if phase not in TERMINAL_PHASES:
+        return
+    hits: dict[str, int] = {}
+    for event in state.get("events", ()):
+        detail = getattr(event, "detail", None)
+        if not isinstance(detail, dict):
+            continue
+        rule_id = detail.get("rule_id")
+        if isinstance(rule_id, str) and rule_id.startswith("rule_"):
+            hits[rule_id] = hits.get(rule_id, 0) + 1
+    if hits:
+        rule_store.record_hits(hits)
+
+
 @router.post("/runs/{run_id}/advance")
 async def advance_run(run_id: str, request: Request) -> RunView:
     """Do the next bounded piece of work."""
-    _same_origin(request)
+    require_same_origin(request)
     _owned_run(run_id, request)
     try:
         result = await run_in_threadpool(runner.advance, run_id)
@@ -359,6 +391,7 @@ async def advance_run(run_id: str, request: Request) -> RunView:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"The migration could not continue ({type(error).__name__}).",
         ) from None
+    _record_rule_hits(result.state)
     return build_run_view(run_id, result.state, paused=result.paused, runnable=result.runnable)
 
 
@@ -370,7 +403,7 @@ async def resolve_run(run_id: str, request: Request, decisions: dict[str, Any]) 
     to have applied anything: the graph re-derives records from the decision and
     revalidates.
     """
-    _same_origin(request)
+    require_same_origin(request)
     _owned_run(run_id, request)
 
     if not decisions:
@@ -406,3 +439,89 @@ def list_runs(request: Request) -> dict[str, Any]:
             for record in registry.list_runs(session_id)
         ]
     }
+
+
+@router.get("/runs/{run_id}/proposed-rules")
+def read_proposed_rules(run_id: str, request: Request) -> dict[str, Any]:
+    """Rules the model drafted from this run's decisions, awaiting approval.
+
+    A GET, so it never mutates: declining a proposal is simply not accepting it,
+    and needs no route of its own.
+    """
+    _owned_run(run_id, request)
+    state = runner.read_state(run_id)
+    if state is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such run.")
+    return {
+        "proposals": [
+            {
+                "proposal_id": proposal.proposal_id,
+                "rule": rule_routes.rule_view(proposal.rule, version=0, editable=False),
+                "scope": proposal.scope.value,
+                "rationale": proposal.rationale,
+                "pre_approved": proposal.pre_approved,
+            }
+            for proposal in state.get("proposed_rules", ())
+        ]
+    }
+
+
+@router.post("/runs/{run_id}/proposed-rules/{proposal_id}/accept")
+def accept_proposed_rule(run_id: str, proposal_id: str, request: Request) -> dict[str, Any]:
+    """Turn one drafted proposal into a rule the caller owns.
+
+    Idempotent by content rather than by proposal id: accepting the same
+    proposal twice, or two proposals that happened to draft the same rule, must
+    store it once. Checking the caller's existing rules for an identical one is
+    simpler than tracking which proposals were already accepted, and it is the
+    same guarantee either way.
+    """
+    require_same_origin(request)
+    record = _owned_run(run_id, request)
+    session_id = record.owner_session_id
+    state = runner.read_state(run_id)
+    if state is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such run.")
+
+    proposal = next(
+        (p for p in state.get("proposed_rules", ()) if p.proposal_id == proposal_id),
+        None,
+    )
+    if proposal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such proposal.")
+
+    try:
+        existing = next(
+            (
+                candidate
+                for candidate in rule_store.list_rules(session_id)
+                if _same_rule(candidate.rule, proposal.rule)
+            ),
+            None,
+        )
+        stored = (
+            existing if existing is not None else rule_store.create_rule(session_id, proposal.rule)
+        )
+    except rule_store.RuleLimitError as limit:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(limit)
+        ) from None
+    except Exception as error:
+        logger.warning("rule store unavailable: %s", type(error).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Rules are unavailable right now.",
+        ) from None
+
+    return rule_routes.rule_view(stored.rule, version=stored.version, editable=True)
+
+
+def _same_rule(a: Rule, b: Rule) -> bool:
+    """Whether two rules would behave identically, ignoring identity and provenance.
+
+    Used to recognise a proposal already accepted, so approving it twice — or
+    approving two proposals that happened to draft the same rule — cannot create
+    a duplicate.
+    """
+    fields = ("kind", "header", "field_name", "value", "canonical", "date_order", "schema_id")
+    return all(getattr(a, name) == getattr(b, name) for name in fields)

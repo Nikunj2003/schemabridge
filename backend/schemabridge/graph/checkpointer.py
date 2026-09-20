@@ -14,7 +14,7 @@ from typing import Any
 from langgraph.checkpoint.mongodb import MongoDBSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
-from schemabridge.domain import models, schema, target
+from schemabridge.domain import models, rules, schema, target
 from schemabridge.server.config import get_settings
 from schemabridge.server.mongo import get_client
 
@@ -63,6 +63,15 @@ _ALLOWED_TYPES: tuple[type, ...] = (
     # ride along on it. Verified rather than assumed.
     schema.TargetSchema,
     schema.ValueKind,
+    # Rules and proposals are top-level channel values, so each needs listing in
+    # its own right. `RuleProvenance` rides along inside `Rule`, and `Rule` inside
+    # `ProposedRule`, but both are also stored directly, so both are named.
+    rules.DateOrder,
+    rules.ProposedRule,
+    rules.Rule,
+    rules.RuleKind,
+    rules.RuleOrigin,
+    rules.RuleScope,
 )
 
 

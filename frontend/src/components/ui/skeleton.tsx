@@ -44,3 +44,33 @@ export function SchemaBuilderSkeleton() {
     </div>
   );
 }
+
+/**
+ * The rule editor's own shape.
+ *
+ * Laid out to match what replaces it — one panel of controls, then the preview
+ * panel — so the page does not visibly reflow the moment the schema arrives.
+ */
+export function RulesBuilderSkeleton() {
+  return (
+    <div className="mx-auto max-w-[56rem] px-4 py-6 sm:px-8 sm:py-8" aria-busy="true">
+      <span className="sr-only">Loading rule editor…</span>
+      <Skeleton className="h-7 w-32" />
+      <Skeleton className="mt-3 h-4 max-w-[36rem]" />
+      <div className="panel mt-6 px-5 py-5 sm:px-6">
+        <Skeleton className="h-4 w-44" />
+        <Skeleton className="mt-3 h-10 w-full" />
+        <div className="mt-5 grid gap-4 sm:grid-cols-2">
+          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-10 w-full" />
+        </div>
+        <Skeleton className="mt-5 h-16 w-full" />
+      </div>
+      <div className="panel mt-5 px-5 py-5 sm:px-6">
+        <Skeleton className="h-4 w-28" />
+        <Skeleton className="mt-3 h-4 max-w-[34rem]" />
+        <Skeleton className="mt-4 h-9 w-32" />
+      </div>
+    </div>
+  );
+}

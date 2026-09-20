@@ -15,6 +15,7 @@ gets the same checks the built-in template does.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
@@ -29,6 +30,7 @@ from schemabridge.domain.models import (
     ValidationPass,
     ValidationPassLabel,
 )
+from schemabridge.domain.rules import EMPTY_RULES, RuleSet
 from schemabridge.domain.schema import TargetSchema, ValueKind
 
 #: The schema's own "email" format check only looks for a single "@", so it
@@ -184,11 +186,22 @@ class TwoPassResult:
     no_repair_available: bool
 
 
-def run_validation_passes(source: SourceValues, *, schema: TargetSchema) -> TwoPassResult:
+def run_validation_passes(
+    source: SourceValues,
+    *,
+    schema: TargetSchema,
+    rules: RuleSet = EMPTY_RULES,
+    headers: Mapping[str, str] | None = None,
+) -> TwoPassResult:
     """Evaluate a record at most twice, with one bounded repair pass between.
 
     Returns after the first pass when the record is already valid, so clean data
     is never needlessly rewritten.
+
+    Learned rules widen what the single repair pass can fix; they do not add a pass.
+    A record still fails twice or not at all, because "validated exactly twice" is a
+    promise about how much the engine will retry before asking someone, and a rule
+    that bought a third attempt would quietly break it.
     """
     first = validate_record(source, schema=schema)
     first_pass = ValidationPass(
@@ -205,7 +218,7 @@ def run_validation_passes(source: SourceValues, *, schema: TargetSchema) -> TwoP
             no_repair_available=False,
         )
 
-    repaired = apply_safe_repairs(source, schema=schema)
+    repaired = apply_safe_repairs(source, schema=schema, rules=rules, headers=headers)
     second = validate_record(repaired.values, schema=schema)
     second_pass = ValidationPass(
         label=ValidationPassLabel.AFTER_REPAIR, valid=second.valid, errors=second.errors

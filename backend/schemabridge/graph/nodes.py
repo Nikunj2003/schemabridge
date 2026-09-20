@@ -18,6 +18,7 @@ from typing import Any
 
 from langgraph.types import interrupt
 
+from schemabridge.agent.induce import propose_rule_from_decision
 from schemabridge.agent.propose import propose_unresolved_mappings
 from schemabridge.domain.identity import IncomingRow, reconcile_identities
 from schemabridge.domain.mapping import POLICY_VERSION, decide_mappings
@@ -42,9 +43,15 @@ from schemabridge.domain.models import (
     RunPhase,
     ValidationError,
 )
+from schemabridge.domain.rules import ProposedRule
 from schemabridge.domain.schema import TargetSchema
 from schemabridge.domain.validate import run_validation_passes
-from schemabridge.graph.state import MigrationState, next_sequence, run_schema
+from schemabridge.graph.state import (
+    MigrationState,
+    next_sequence,
+    run_rules,
+    run_schema,
+)
 from schemabridge.server.target_client import (
     MAX_ATTEMPTS,
     attempt_record,
@@ -114,14 +121,43 @@ def propose_mappings(state: MigrationState) -> dict[str, Any]:
     schema = run_schema(state)
     seq = next_sequence(state)
 
-    result = decide_mappings(columns, profiles, schema=schema)
+    rules = run_rules(state)
+    result = decide_mappings(columns, profiles, schema=schema, rules=rules)
 
     events: list[AuditEvent] = []
     for decision in result.decisions:
         column = next((c for c in columns if c.id == decision.column_id), None)
         header = column.header if column else decision.column_id
 
-        if decision.outcome is MappingOutcome.AUTO_MAPPED and decision.target:
+        # Which rule answered, when one did, so the trail can distinguish a match the
+        # engine shipped knowing from one this person taught it. Read back from the
+        # overlay rather than from the decision, because the decision records the
+        # basis but not the rule's identity — and from the index that actually
+        # answered: an excluded column was decided by an ignore rule, and asking the
+        # alias index about it would find nothing and silently drop the attribution.
+        matched = None
+        if decision.basis is MappingBasis.LEARNED_ALIAS:
+            matched = (
+                rules.ignores(header)
+                if decision.outcome is MappingOutcome.EXCLUDED
+                else rules.alias_for(header)
+            )
+        rule_id = matched.rule_id if matched else None
+        rule_origin = matched.origin.value if matched else None
+
+        if decision.outcome is MappingOutcome.EXCLUDED:
+            events.append(
+                _event(
+                    seq,
+                    "column_skipped",
+                    decision.evidence[0] if decision.evidence else "Left out by a rule.",
+                    execution_basis=EventExecutionBasis.DETERMINISTIC,
+                    subject=header,
+                    rule_id=rule_id,
+                    rule_origin=rule_origin,
+                )
+            )
+        elif decision.outcome is MappingOutcome.AUTO_MAPPED and decision.target:
             events.append(
                 _event(
                     seq,
@@ -131,6 +167,8 @@ def propose_mappings(state: MigrationState) -> dict[str, Any]:
                     subject=header,
                     after=_label(schema, decision.target),
                     basis=decision.basis.value,
+                    rule_id=rule_id,
+                    rule_origin=rule_origin,
                 )
             )
         else:
@@ -146,14 +184,19 @@ def propose_mappings(state: MigrationState) -> dict[str, Any]:
         seq += 1
 
     automatic = sum(1 for d in result.decisions if d.outcome is MappingOutcome.AUTO_MAPPED)
+    learned = sum(1 for d in result.decisions if d.basis is MappingBasis.LEARNED_ALIAS)
     events.append(
         _event(
             seq,
             "mapping_summary",
-            f"{automatic} of {len(result.decisions)} columns mapped without asking.",
+            (
+                f"{automatic} of {len(result.decisions)} columns mapped without asking"
+                + (f", {learned} of them by a rule you approved." if learned else ".")
+            ),
             execution_basis=EventExecutionBasis.DETERMINISTIC,
             automatic=automatic,
             escalated=len(result.decisions) - automatic,
+            learned=learned,
         )
     )
 
@@ -187,7 +230,17 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
         if decision.outcome is MappingOutcome.AUTO_MAPPED and decision.target
     }
 
-    outcome = propose_unresolved_mappings(columns, profiles, unresolved, taken, schema=schema)
+    outcome = propose_unresolved_mappings(
+        columns,
+        profiles,
+        unresolved,
+        taken,
+        schema=schema,
+        # The committed counter, not a local tally: this node can be reached again
+        # after a pause, in a different process, and the checkpoint is the only
+        # place that remembers what the run has already spent.
+        requests_used_in_run=int(state.get("model_requests", 0)),
+    )
 
     seq = next_sequence(state)
     by_id = {column.id: column for column in columns}
@@ -493,6 +546,122 @@ def apply_resolutions(state: MigrationState) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def induce_rules(state: MigrationState) -> dict[str, Any]:
+    """Draft rules from the decisions the reviewer just made.
+
+    Placed after `apply_resolutions` because it needs the answer, and gated on
+    `induced_for` because the graph re-enters that path once per correction cycle:
+    without the gate, every decision a reviewer made would re-draft a rule for every
+    decision before it, and the budget would go on repeats.
+
+    Nothing here changes the migration. The reviewer's decision has already been
+    applied by the time this runs; a proposal is an offer about *future* runs, and a
+    value-scope proposal only touches this run once it is approved. That separation
+    is what makes it safe for the drafting step to be the least reliable part of the
+    system.
+    """
+    resolutions = state.get("resolutions", {})
+    if not resolutions:
+        return {}
+
+    already = set(state.get("induced_for", ()))
+    pending = [issue_id for issue_id in resolutions if issue_id not in already]
+    if not pending:
+        return {}
+
+    issues = {issue.id: issue for issue in state.get("issues", ())}
+    schema = run_schema(state)
+    run_id = str(state.get("run_id", ""))
+    spent = int(state.get("model_requests", 0))
+
+    proposals: list[ProposedRule] = []
+    events: list[AuditEvent] = []
+    seq = next_sequence(state)
+
+    for issue_id in pending:
+        issue = issues.get(issue_id)
+        choice = resolutions.get(issue_id)
+        if issue is None or not isinstance(choice, dict):
+            continue
+
+        action = str(choice.get("action", "approve"))
+        chosen = str(choice.get("value") or choice.get("option_id") or action)
+        # The reviewer can pre-authorise on the question itself, which is what lets a
+        # value rule apply to the rest of the run without interrupting them twice.
+        pre_approved = bool(choice.get("remember"))
+
+        proposal, used, unavailable = propose_rule_from_decision(
+            issue,
+            action,
+            chosen,
+            schema=schema,
+            run_id=run_id,
+            requests_used_in_run=spent,
+            pre_approved=pre_approved,
+        )
+        spent += used
+
+        if used > 0:
+            events.append(
+                _event(
+                    seq,
+                    "rule_induction_requested",
+                    (
+                        "Asked the model whether this decision generalises into a rule "
+                        "worth keeping. Any draft is checked against the schema first."
+                    ),
+                    execution_basis=EventExecutionBasis.MODEL_ASSISTED,
+                    subject=issue.id,
+                )
+            )
+            seq += 1
+
+        if unavailable:
+            events.append(
+                _event(
+                    seq,
+                    "rule_induction_unavailable",
+                    unavailable,
+                    execution_basis=EventExecutionBasis.DETERMINISTIC,
+                    actor=Actor.SYSTEM,
+                )
+            )
+            seq += 1
+            continue
+
+        if proposal is None:
+            continue
+
+        proposals.append(proposal)
+        events.append(
+            _event(
+                seq,
+                "rule_proposed",
+                (
+                    f"{proposal.rationale} Nothing changes until you approve it."
+                    if proposal.rationale
+                    else "A rule was drafted from your decision. Nothing changes "
+                    "until you approve it."
+                ),
+                execution_basis=EventExecutionBasis.MODEL_ASSISTED,
+                subject=issue.id,
+                scope=proposal.scope.value,
+                rule_kind=proposal.rule.kind.value,
+            )
+        )
+        seq += 1
+
+    return {
+        "proposed_rules": tuple(proposals),
+        # Recorded for every pending issue, including those that produced nothing:
+        # a decision that did not generalise must not be reconsidered on the next
+        # pass, or the refusal would be paid for repeatedly.
+        "induced_for": tuple(already | set(pending)),
+        "events": tuple(events),
+        "model_requests": spent,
+    }
+
+
 def _accepted_targets(state: MigrationState) -> dict[str, str]:
     """Column to target field name, with reviewer corrections taking precedence."""
     accepted: dict[str, str] = {}
@@ -528,7 +697,7 @@ def reconcile(state: MigrationState) -> dict[str, Any]:
             )
         )
 
-    result = reconcile_identities(incoming, schema=schema)
+    result = reconcile_identities(incoming, schema=schema, rules=run_rules(state))
     events = [
         _event(
             seq,
@@ -590,6 +759,16 @@ def clean_and_validate(state: MigrationState) -> dict[str, Any]:
     """Apply safe repairs and validate, escalating anything that fails twice."""
     seq = next_sequence(state)
     schema = run_schema(state)
+    rules = run_rules(state)
+    # Which source header supplied each field, so a date rule scoped to one column
+    # is not applied to another column feeding the same field.
+    headers_by_field = {
+        decision.target: column.header
+        for decision in state.get("mappings", ())
+        if decision.target
+        for column in state.get("columns", ())
+        if column.id == decision.column_id
+    }
     excluded_ids, corrections = _record_resolutions(state)
     validated: list[CanonicalRecord] = []
     issues: list[ReviewIssue] = []
@@ -613,7 +792,9 @@ def clean_and_validate(state: MigrationState) -> dict[str, Any]:
         if applied:
             values.update(applied)
 
-        outcome = run_validation_passes(values, schema=schema)
+        outcome = run_validation_passes(
+            values, schema=schema, rules=rules, headers=headers_by_field
+        )
         repair_count += len(outcome.repairs)
 
         for repair in outcome.repairs:

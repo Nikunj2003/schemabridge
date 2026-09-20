@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 
 from schemabridge import __version__
 from schemabridge.api.mock_target import router as mock_target_router
+from schemabridge.api.rule_routes import router as rules_router
 from schemabridge.api.runs import router as runs_router
 from schemabridge.api.schema_routes import router as schemas_router
 from schemabridge.server.config import get_settings
@@ -31,12 +32,20 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """
     if get_settings().has_database:
         try:
-            from schemabridge.server import budget, migration_quota, receipts, runs, schemas
+            from schemabridge.server import (
+                budget,
+                migration_quota,
+                receipts,
+                rules,
+                runs,
+                schemas,
+            )
 
             runs.ensure_indexes()
             receipts.ensure_indexes()
             budget.ensure_indexes()
             schemas.ensure_indexes()
+            rules.ensure_indexes()
             migration_quota.ensure_indexes()
         except Exception:
             logger.warning("could not create indexes at startup", exc_info=False)
@@ -65,6 +74,7 @@ app = FastAPI(
 
 app.include_router(runs_router)
 app.include_router(schemas_router)
+app.include_router(rules_router)
 app.include_router(mock_target_router)
 
 

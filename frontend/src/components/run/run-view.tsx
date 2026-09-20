@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { ContentFrame } from "@/components/app/content-frame";
 import { Activity } from "@/components/run/activity";
+import { ProposedRules } from "@/components/rules/proposed-rules";
 import { Decision } from "@/components/run/decision";
 import { Results } from "@/components/run/results";
 import { Stages } from "@/components/run/stages";
@@ -88,7 +89,14 @@ export function RunView({ runId }: { runId: string }) {
         <Stages stages={stages} />
       </section>
 
-      <ModelInvolvement requests={run.counters.model_requests} llmSteps={modelAssisted} />
+      <ModelInvolvement
+        requests={run.counters.model_requests}
+        llmSteps={modelAssisted}
+        ruleHits={run.counters.rule_hits}
+        learnedHits={run.counters.learned_hits}
+        avoided={run.counters.model_requests_avoided}
+        decisions={answered.length}
+      />
 
       {refreshError && (
         <p role="status" className="mt-4 rounded-md border border-attention/30 bg-attention-soft px-4 py-3 text-[13px] text-attention">
@@ -113,6 +121,8 @@ export function RunView({ runId }: { runId: string }) {
           <Working run={run} latest={latest} />
         )}
       </div>
+
+      {finished && <ProposedRules runId={runId} schemaName={run.schema_name} />}
 
       <section className="panel mt-5 overflow-hidden">
         <div className="flex items-center gap-2 border-b border-line px-5 py-3 text-[13.5px] font-medium">
@@ -157,22 +167,79 @@ export function RunView({ runId }: { runId: string }) {
 }
 
 /**
- * Where the LLM took part, stated from counters the engine actually recorded.
+ * Who did the work, from counters the engine actually recorded.
  *
- * `llmSteps` counts audit rows marked LLM, which includes the request itself, so
- * a request the verifier then refused is still visible here and in the trail.
+ * Three actors, always named, because "which of these decided this" is the
+ * question the whole design answers. A migration with no model request is not a
+ * migration missing a feature — it is one where the rules were enough, and this
+ * says so rather than leaving an absence to be read as a failure.
+ *
+ * `llmSteps` counts audit rows marked LLM, which includes the request itself, so a
+ * request whose every suggestion the verifier refused is still visible here.
  */
-function ModelInvolvement({ requests, llmSteps }: { requests: number; llmSteps: number }) {
-  const plural = requests === 1 ? "request" : "requests";
-  const message =
-    requests === 0
-      ? "The rule engine did all of this. No LLM request was made."
-      : `${requests} LLM ${plural} in this migration, marked in the audit below. Anything the model suggests is checked against the schema before it is applied.`;
+function ModelInvolvement({
+  requests,
+  llmSteps,
+  ruleHits,
+  learnedHits,
+  avoided,
+  decisions,
+}: {
+  requests: number;
+  llmSteps: number;
+  ruleHits: number;
+  learnedHits: number;
+  avoided: number;
+  decisions: number;
+}) {
   return (
-    <section className="mt-3 flex flex-wrap items-center gap-2 rounded-md border border-line bg-surface px-4 py-2.5 text-[12.5px] text-ink-muted">
-      {llmSteps > 0 && <ExecutionBasis basis="model_assisted" compact />}
-      <span>{message}</span>
+    <section className="mt-3 rounded-md border border-line bg-surface px-4 py-3">
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-[12.5px]">
+        <Actor
+          basis="deterministic"
+          count={ruleHits}
+          noun="rule"
+          detail={learnedHits > 0 ? `${learnedHits} you taught` : undefined}
+        />
+        <Actor basis="model_assisted" count={requests} noun="LLM request" />
+        <Actor basis="human" count={decisions} noun="decision" />
+      </div>
+
+      <p className="mt-2 border-t border-line pt-2 text-[12.5px] text-ink-muted">
+        {requests === 0
+          ? avoided > 0
+            ? `The rules handled all of this, including ${avoided} ${avoided === 1 ? "column" : "columns"} that would otherwise have needed the LLM. No model request was made.`
+            : "The rules handled all of this on their own. No model request was made."
+          : avoided > 0
+            ? `Anything the model suggests is checked against the schema before it is applied. Rules you approved saved ${avoided} further ${avoided === 1 ? "request" : "requests"}.`
+            : "Anything the model suggests is checked against the schema before it is applied. Approving a rule from a question below means it is not asked again."}
+        {llmSteps > 0 && " Every model step is marked in the audit."}
+      </p>
     </section>
+  );
+}
+
+/** One actor and what it accounted for, with the same badge the audit uses. */
+function Actor({
+  basis,
+  count,
+  noun,
+  detail,
+}: {
+  basis: import("@/lib/api").ExecutionBasis;
+  count: number;
+  noun: string;
+  detail?: string;
+}) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <ExecutionBasis basis={basis} compact />
+      <span className="tnum font-medium">{count}</span>
+      <span className="text-ink-muted">
+        {count === 1 ? noun : `${noun}s`}
+        {detail && <span className="text-ink-subtle"> · {detail}</span>}
+      </span>
+    </span>
   );
 }
 

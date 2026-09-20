@@ -89,3 +89,71 @@ class TestNamesAreStillStrings:
         """Relaxing the enum must not mean accepting anything at all."""
         with pytest.raises(ValidationError):
             _decision(bad)  # type: ignore[arg-type]
+
+
+class TestRuleRoundTrip:
+    """Rule models must survive the checkpointer as their own types.
+
+    The failure this guards against is silent: an unlisted model comes back as a
+    plain dict with only a log line, so the run keeps going and the mistake surfaces
+    much later as a rule that never fires. Asserting the restored *type* is the only
+    way to catch it at the point it is introduced.
+    """
+
+    def test_every_rule_model_restores_as_itself(self) -> None:
+        from schemabridge.domain.rules import (
+            DateOrder,
+            ProposedRule,
+            Rule,
+            RuleKind,
+            RuleOrigin,
+            RuleProvenance,
+            RuleScope,
+        )
+        from schemabridge.graph.checkpointer import build_serializer
+
+        rule = Rule(
+            rule_id="rule_abc",
+            kind=RuleKind.HEADER_ALIAS,
+            origin=RuleOrigin.LEARNED,
+            schema_id="builtin:employee",
+            header="Cost Centre Ref",
+            field_name="department",
+            provenance=RuleProvenance(run_id="r1", issue_id="i1", decision="department"),
+            rationale="Taught by a decision.",
+        )
+        proposal = ProposedRule(
+            proposal_id="p1", rule=rule, scope=RuleScope.COLUMN, rationale="Generalises."
+        )
+        serializer = build_serializer()
+
+        for value in (rule, proposal, DateOrder.DAY_FIRST, RuleKind.VALUE_ALIAS):
+            restored = serializer.loads_typed(serializer.dumps_typed(value))
+            assert type(restored) is type(value), f"{value!r} degraded to {type(restored)}"
+            assert restored == value
+
+    def test_a_tuple_of_rules_restores_as_rules(self) -> None:
+        """Rules reach the state as a tuple channel, which is how they must survive."""
+        from schemabridge.domain.rules import Rule, RuleKind
+        from schemabridge.graph.checkpointer import build_serializer
+
+        stored = (
+            Rule(
+                rule_id="rule_1",
+                kind=RuleKind.COLUMN_IGNORE,
+                header="S.No",
+                schema_id="builtin:employee",
+            ),
+            Rule(
+                rule_id="rule_2",
+                kind=RuleKind.VALUE_ALIAS,
+                schema_id="builtin:employee",
+                field_name="employmentType",
+                value="Seasonal Temp",
+                canonical="contract",
+            ),
+        )
+        serializer = build_serializer()
+        restored = serializer.loads_typed(serializer.dumps_typed(stored))
+        assert all(isinstance(entry, Rule) for entry in restored)
+        assert tuple(restored) == stored

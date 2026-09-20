@@ -17,6 +17,7 @@ const WORKSPACE: NavItem[] = [
 
 const REFERENCE: NavItem[] = [
   { href: "/app/schema", label: "My schema", icon: <IconSchema /> },
+  { href: "/app/rules", label: "Rules", icon: <IconRules /> },
   { href: "/app/usage", label: "Usage & data", icon: <IconGauge /> },
 ];
 
@@ -217,6 +218,9 @@ function AccountMenu({
             <Link href="/app/schema" className="block rounded px-2.5 py-1.5 text-[13.5px] hover:bg-sunken">
               My schema
             </Link>
+            <Link href="/app/rules" className="block rounded px-2.5 py-1.5 text-[13.5px] hover:bg-sunken">
+              Rules
+            </Link>
             <div className="my-1 h-px bg-line" />
             <Link href="/" className="block rounded px-2.5 py-1.5 text-[13.5px] hover:bg-sunken">
               Back to home
@@ -252,6 +256,15 @@ function IconSchema() {
     <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <rect x="3.5" y="4" width="17" height="16" rx="2" />
       <path d="M3.5 9h17M9 9v11" opacity=".55" />
+    </svg>
+  );
+}
+
+function IconRules() {
+  return (
+    <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 6h10M4 12h16M4 18h7" />
+      <path d="M18 5.5v3M16.5 7h3" opacity=".55" />
     </svg>
   );
 }

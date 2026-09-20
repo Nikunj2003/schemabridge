@@ -26,7 +26,11 @@ from schemabridge.agent.tools import (
 )
 from schemabridge.domain.models import ColumnProfile, SourceColumn
 from schemabridge.domain.schema import TargetSchema
-from schemabridge.server.budget import BudgetExhaustedError, reserve_model_request
+from schemabridge.server.budget import (
+    BudgetExhaustedError,
+    check_run_budget,
+    reserve_model_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +85,7 @@ def propose_unresolved_mappings(
     already_taken: set[str],
     *,
     schema: TargetSchema,
+    requests_used_in_run: int = 0,
 ) -> ProposalOutcome:
     """Ask the model about columns deterministic rules could not place."""
     pending = [column for column in columns if column.id in set(unresolved)]
@@ -90,6 +95,10 @@ def propose_unresolved_mappings(
     considered = tuple(column.id for column in pending)
 
     try:
+        # The run's own allowance first: it needs no database round trip, and
+        # refusing here leaves the shared daily counter untouched for everyone
+        # else rather than spending it on a run that has had its turn.
+        check_run_budget(requests_used_in_run)
         reserve_model_request(1)
     except BudgetExhaustedError as exhausted:
         return ProposalOutcome(unavailable_reason=str(exhausted), considered=considered)

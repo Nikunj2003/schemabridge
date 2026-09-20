@@ -18,19 +18,7 @@ from dataclasses import dataclass
 from schemabridge.agent.sanitize import safe_value
 from schemabridge.domain.models import ColumnProfile, SourceColumn
 from schemabridge.domain.normalize import detect_value_kinds
-from schemabridge.domain.schema import TargetSchema, ValueKind
-
-#: Compatible value kinds per target kind, mirroring the deterministic policy.
-_COMPATIBLE: dict[ValueKind, frozenset[ValueKind]] = {
-    ValueKind.IDENTIFIER: frozenset({ValueKind.IDENTIFIER, ValueKind.TEXT}),
-    ValueKind.PERSON_NAME: frozenset({ValueKind.PERSON_NAME, ValueKind.TEXT}),
-    ValueKind.EMAIL: frozenset({ValueKind.EMAIL}),
-    ValueKind.DATE: frozenset({ValueKind.DATE}),
-    ValueKind.TEXT: frozenset(
-        {ValueKind.TEXT, ValueKind.ENUM, ValueKind.PERSON_NAME, ValueKind.IDENTIFIER}
-    ),
-    ValueKind.ENUM: frozenset({ValueKind.ENUM, ValueKind.TEXT}),
-}
+from schemabridge.domain.schema import TargetSchema, ValueKind, kinds_compatible
 
 _MAX_SAMPLES = 3
 
@@ -43,9 +31,14 @@ def describe_target_schema(schema: TargetSchema, *, exclude: set[str] | None = N
     more reliable than a rule telling it not to.
     """
     taken = exclude or set()
-    lines = [f"Target schema: {schema.name}"]
+    # Scrubbed like any other prompt content. A schema is authored by its owner
+    # rather than uploaded, so this is not the untrusted-file case — but a schema
+    # can be imported from a spec file, and a learned rule's rationale is written by
+    # the model and shown back to it on a later run. Neither is worth trusting to
+    # stay free of prompt structure.
+    lines = [f"Target schema: {safe_value(schema.name)}"]
     if schema.description:
-        lines.append(schema.description)
+        lines.append(safe_value(schema.description))
     lines.append("")
     lines.append("Permitted target fields:")
     for spec in schema.fields:
@@ -54,9 +47,9 @@ def describe_target_schema(schema: TargetSchema, *, exclude: set[str] | None = N
         requirement = "required" if spec.required else "optional"
         detail = f"- {spec.name} ({requirement}, {spec.kind.value})"
         if spec.description:
-            detail += f": {spec.description}"
+            detail += f": {safe_value(spec.description)}"
         if spec.enum_values:
-            detail += f" Allowed values: {', '.join(spec.enum_values)}."
+            detail += f" Allowed values: {', '.join(safe_value(v) for v in spec.enum_values)}."
         lines.append(detail)
     if taken:
         lines.append("")
@@ -143,8 +136,9 @@ def check_proposed_mapping(
         kinds = profile.detected_kinds or tuple(detect_value_kinds(list(profile.samples)))
 
     if kinds:
-        allowed = _COMPATIBLE[spec.kind]
-        if not any(kind in allowed for kind in kinds):
+        # The same table the deterministic gates use, so the verifier cannot be
+        # more permissive than the policy it is standing in for.
+        if not kinds_compatible(spec.kind, kinds):
             return CheckedMapping(
                 column.id,
                 target,

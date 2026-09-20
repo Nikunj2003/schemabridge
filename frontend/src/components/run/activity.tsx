@@ -24,7 +24,8 @@ export function Activity({ events }: { events: ActivityEvent[] }) {
     <>
       <p className="border-b border-line bg-sunken px-4 py-2 text-[12px] text-ink-muted">
         Each step names what did the work: the <span className="font-medium text-accent-ink">LLM</span>,
-        the rule engine, or you.
+        the rule engine, or you. A step marked <span className="font-medium">Learned</span> came from a
+        rule you approved, so it cost no model request.
       </p>
       <ol className="divide-y divide-line">
         {[...events].reverse().map((event) => (
@@ -43,6 +44,14 @@ export function Activity({ events }: { events: ActivityEvent[] }) {
                 {event.subject && <span className="text-ink-muted"> · {event.subject}</span>}
               </p>
               <ExecutionBasis basis={event.execution_basis} compact />
+              {event.rule_origin === "learned" && (
+                <span
+                  className="rounded border border-ok/30 bg-ok-soft px-1.5 py-0.5 text-[10.5px] font-medium text-ok"
+                  title="A rule you approved answered this, so the engine did not need to ask or to call the model."
+                >
+                  Learned
+                </span>
+              )}
             </div>
             {event.reason && (
               <p className="mt-1 pl-[3.6rem] text-[12.5px] leading-snug text-ink-muted">

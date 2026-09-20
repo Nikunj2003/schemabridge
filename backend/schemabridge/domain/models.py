@@ -104,6 +104,10 @@ class SourceRow(Frozen):
 class MappingBasis(StrEnum):
     EXACT_NAME = "exact_name"
     ALIAS = "alias"
+    #: A rule the reviewer approved after an earlier migration asked them. Kept
+    #: distinct from ALIAS so the trail can say the engine knew this because it was
+    #: taught, rather than because it shipped knowing it.
+    LEARNED_ALIAS = "learned_alias"
     MODEL_ASSISTED = "model_assisted"
     HUMAN_CORRECTION = "human_correction"
     UNMAPPED = "unmapped"

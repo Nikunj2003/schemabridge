@@ -30,21 +30,15 @@ from schemabridge.domain.models import (
     SourceColumn,
 )
 from schemabridge.domain.normalize import detect_value_kinds
-from schemabridge.domain.schema import TargetFieldSpec, TargetSchema, ValueKind
+from schemabridge.domain.rules import EMPTY_RULES, RuleSet
+from schemabridge.domain.schema import (
+    TargetFieldSpec,
+    TargetSchema,
+    ValueKind,
+    kinds_compatible,
+)
 
 POLICY_VERSION = "mapping/2"
-
-#: Value kinds acceptable as evidence for each target kind.
-_COMPATIBLE_KINDS: dict[ValueKind, frozenset[ValueKind]] = {
-    ValueKind.IDENTIFIER: frozenset({ValueKind.IDENTIFIER, ValueKind.TEXT}),
-    ValueKind.PERSON_NAME: frozenset({ValueKind.PERSON_NAME, ValueKind.TEXT}),
-    ValueKind.EMAIL: frozenset({ValueKind.EMAIL}),
-    ValueKind.DATE: frozenset({ValueKind.DATE}),
-    ValueKind.TEXT: frozenset(
-        {ValueKind.TEXT, ValueKind.ENUM, ValueKind.PERSON_NAME, ValueKind.IDENTIFIER}
-    ),
-    ValueKind.ENUM: frozenset({ValueKind.ENUM, ValueKind.TEXT}),
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,33 +64,50 @@ def _profile_kinds(profile: ColumnProfile) -> tuple[ValueKind, ...]:
 
 
 def _is_type_compatible(spec: TargetFieldSpec, kinds: Sequence[ValueKind]) -> bool:
-    if not kinds:
-        return True  # No values to contradict the header.
-    allowed = _COMPATIBLE_KINDS[spec.kind]
-    return any(kind in allowed for kind in kinds)
+    return kinds_compatible(spec.kind, kinds)
 
 
 def _shared_header_fields(
-    column: SourceColumn, schema: TargetSchema
+    column: SourceColumn, schema: TargetSchema, rules: RuleSet = EMPTY_RULES
 ) -> tuple[TargetFieldSpec, ...]:
     """Fields that all claim this column's header, when more than one does.
 
     Empty when the header is unclaimed or claimed by exactly one field. A header
     two fields share cannot be settled by the header alone, whatever the values
     look like.
+
+    One thing does settle it: a rule naming this exact header for one of those
+    fields. That is not the overlay overruling the gate — it is a person having
+    already answered this precise question and asked not to be asked again. The
+    distinction matters: a rule for an *unrelated* header never suppresses the
+    gate, so a bare "Date" in a schema holding both a start and an end date still
+    escalates for anyone who has not explicitly resolved that header.
     """
     names = schema.fields_for_header(column.normalized_header)
     if len(names) < 2:
+        return ()
+    learned = rules.alias_for(column.header)
+    if learned is not None and learned.field_name in names:
         return ()
     return tuple(spec for name in names if (spec := schema.field(name)))
 
 
 def _candidates_for(
-    column: SourceColumn, profile: ColumnProfile | None, schema: TargetSchema
+    column: SourceColumn,
+    profile: ColumnProfile | None,
+    schema: TargetSchema,
+    rules: RuleSet = EMPTY_RULES,
 ) -> list[_Candidate]:
-    """Every target field whose name or spellings match this column's header."""
+    """Every target field whose name, spellings or a learned rule match this header.
+
+    A learned rule is a third way to match, ranking with the other two rather than
+    above them: it still faces the type-compatibility check and still loses to the
+    shared-header gate. What it changes is only *whether* a field is a candidate —
+    never whether a candidate may be applied without asking.
+    """
     kinds = _profile_kinds(profile) if profile else ()
     candidates: list[_Candidate] = []
+    learned = rules.alias_for(column.header)
 
     for spec in schema.fields:
         evidence: list[str] = []
@@ -108,6 +119,14 @@ def _candidates_for(
         elif column.normalized_header in spec.spellings:
             basis = MappingBasis.ALIAS
             evidence.append(f'Header "{column.header}" is a known spelling of {spec.label}.')
+        elif learned is not None and learned.field_name == spec.name:
+            basis = MappingBasis.LEARNED_ALIAS
+            evidence.append(
+                f'A rule you approved says "{column.header}" is {spec.label}.'
+                if not learned.rationale
+                else f'A rule you approved says "{column.header}" is {spec.label}: '
+                f"{learned.rationale}"
+            )
 
         if basis is None:
             continue
@@ -194,19 +213,45 @@ def decide_mappings(
     profiles: Sequence[ColumnProfile],
     *,
     schema: TargetSchema,
+    rules: RuleSet = EMPTY_RULES,
 ) -> MappingResult:
-    """Decide the mapping for every source column."""
+    """Decide the mapping for every source column.
+
+    `rules` defaults to the empty overlay, so the behaviour without learned rules
+    is the behaviour this function had before they existed.
+    """
     profile_by_id = {profile.column_id: profile for profile in profiles}
+
+    # Columns a rule says to ignore leave the policy entirely rather than being
+    # mapped and then excluded: an ignored column must not be able to contend for
+    # a target, or to suppress the missing-required-field check by sitting in
+    # `unresolved` forever.
+    considered = [column for column in columns if rules.ignores(column.header) is None]
+
     per_column = {
-        column.id: _candidates_for(column, profile_by_id.get(column.id), schema)
-        for column in columns
+        column.id: _candidates_for(column, profile_by_id.get(column.id), schema, rules)
+        for column in considered
     }
 
     decisions: list[MappingDecision] = []
     issues: list[ReviewIssue] = []
     unresolved: list[str] = []
 
-    contention, contended = _find_contention(columns, per_column, schema)
+    for column in columns:
+        ignored = rules.ignores(column.header)
+        if ignored is None:
+            continue
+        decisions.append(
+            MappingDecision(
+                column_id=column.id,
+                target=None,
+                outcome=MappingOutcome.EXCLUDED,
+                basis=MappingBasis.LEARNED_ALIAS,
+                evidence=(f'A rule you approved leaves "{column.header}" out of migrations.',),
+            )
+        )
+
+    contention, contended = _find_contention(considered, per_column, schema)
 
     for key, competing in contention.items():
         if len(competing) < 2:
@@ -239,14 +284,14 @@ def decide_mappings(
             )
         )
 
-    for column in columns:
+    for column in considered:
         candidates = per_column[column.id]
         viable = [c for c in candidates if c.type_compatible]
         profile = profile_by_id.get(column.id)
         sample = profile.samples[0] if profile and profile.samples else None
 
         # Gate: a header naming a concept several targets share.
-        if specs := _shared_header_fields(column, schema):
+        if specs := _shared_header_fields(column, schema, rules):
             labels = " or ".join(spec.label for spec in specs)
             decisions.append(
                 MappingDecision(

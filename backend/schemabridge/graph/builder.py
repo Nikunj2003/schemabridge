@@ -21,6 +21,7 @@ from schemabridge.graph.nodes import (
     await_review,
     clean_and_validate,
     deliver,
+    induce_rules,
     propose_mappings,
     reconcile,
 )
@@ -74,6 +75,7 @@ def build_graph() -> StateGraph[MigrationState, None, MigrationState, MigrationS
     graph.add_node("clean_and_validate", clean_and_validate)
     graph.add_node("await_review", await_review)
     graph.add_node("apply_resolutions", apply_resolutions)
+    graph.add_node("induce_rules", induce_rules)
     graph.add_node("deliver", deliver)
 
     graph.add_edge(START, "propose_mappings")
@@ -85,8 +87,11 @@ def build_graph() -> StateGraph[MigrationState, None, MigrationState, MigrationS
     graph.add_conditional_edges("await_review", route_after_review)
 
     # A correction changes the mapping, so the affected rows are reconciled and
-    # revalidated rather than trusted as-is.
-    graph.add_edge("apply_resolutions", "reconcile")
+    # revalidated rather than trusted as-is. Rule induction sits between the two:
+    # it needs the decision, and it must not delay applying it, so it runs after the
+    # correction is already in the state and before the work that depends on it.
+    graph.add_edge("apply_resolutions", "induce_rules")
+    graph.add_edge("induce_rules", "reconcile")
     graph.add_conditional_edges(
         "deliver",
         route_after_delivery,

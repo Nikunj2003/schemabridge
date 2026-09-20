@@ -18,6 +18,7 @@ from schemabridge.domain.models import (
     Disposition,
     EventExecutionBasis,
     IssueStatus,
+    MappingBasis,
     MappingOutcome,
     ReviewIssue,
     RunPhase,
@@ -117,6 +118,12 @@ class EventView(BaseModel):
     subject: str | None
     before: str | None
     after: str | None
+    #: Which rule supplied this step, and whether the person taught it. Projected
+    #: from `detail` as a narrow allowlist rather than by sending the whole dict:
+    #: `detail` carries internal counters the browser has no use for, and widening
+    #: it later is a smaller decision than narrowing it.
+    rule_id: str | None = None
+    rule_origin: str | None = None
 
 
 class CountersView(BaseModel):
@@ -134,6 +141,15 @@ class CountersView(BaseModel):
     #: totals reconcile and the UI can show that work remains.
     retrying: int
     awaiting_review: int
+    #: Decisions a rule supplied, shipped or taught.
+    rule_hits: int = 0
+    #: The subset from a rule this person approved, which is the number that shows
+    #: the engine improving rather than merely working.
+    learned_hits: int = 0
+    #: Columns a learned rule placed that had no deterministic answer, so they would
+    #: otherwise have gone to the model. This is the savings claim, and it is
+    #: counted from mapping decisions rather than estimated.
+    model_requests_avoided: int = 0
 
 
 class RunView(BaseModel):
@@ -343,6 +359,17 @@ def _counters(state: dict[str, Any]) -> CountersView:
     rows = len(state.get("rows", ()))
     merged = max(0, rows - len(records)) if records else 0
 
+    # Counted from the decisions themselves rather than from the rule store, so the
+    # number describes this run and cannot drift if a rule is later edited or
+    # deleted. A learned hit is also an avoided model request by construction: the
+    # rule placed a column that no shipped alias matched, which is precisely the
+    # case that would otherwise have been sent to the model.
+    rule_bases = {MappingBasis.ALIAS.value, MappingBasis.LEARNED_ALIAS.value}
+    rule_hits = sum(1 for m in current if _enum_value(_attr(m, "basis")) in rule_bases)
+    learned_hits = sum(
+        1 for m in current if _enum_value(_attr(m, "basis")) == MappingBasis.LEARNED_ALIAS.value
+    )
+
     return CountersView(
         source_rows=rows,
         records=len(records),
@@ -367,6 +394,9 @@ def _counters(state: dict[str, Any]) -> CountersView:
             if _enum_value(_attr(issue, "status"), "open") == IssueStatus.OPEN.value
             and _attr(issue, "blocking", True)
         ),
+        rule_hits=rule_hits,
+        learned_hits=learned_hits,
+        model_requests_avoided=learned_hits,
     )
 
 
@@ -388,9 +418,24 @@ def _event_views(events: tuple[AuditEvent, ...], since: int) -> list[EventView]:
                 subject=_attr(event, "subject"),
                 before=_attr(event, "before"),
                 after=_attr(event, "after"),
+                rule_id=_detail_text(event, "rule_id"),
+                rule_origin=_detail_text(event, "rule_origin"),
             )
         )
     return views
+
+
+def _detail_text(event: Any, key: str) -> str | None:
+    """One allowlisted scalar from an event's detail, as a string or nothing.
+
+    Guarded rather than indexed because `detail` is a plain dict that has survived
+    serialisation, and a checkpoint written before a key existed simply lacks it.
+    """
+    detail = _attr(event, "detail", None)
+    if not isinstance(detail, dict):
+        return None
+    value = detail.get(key)
+    return None if value is None else str(value)
 
 
 def build_run_view(

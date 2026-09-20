@@ -50,7 +50,12 @@ class Settings(BaseSettings):
     port: int = Field(default=8000, alias="PORT")
 
     # --- Demo safety budgets ---------------------------------------------
-    max_model_requests_per_run: int = Field(default=3, alias="AI_MAX_REQUESTS_PER_RUN")
+    #: A run now has two reasons to call out: placing unfamiliar columns, and
+    #: drafting a rule from a decision. Rule drafting happens once per question, so
+    #: a migration with several questions needs headroom above the single mapping
+    #: call — while still being bounded, because the cap is what stops a long
+    #: review from spending the allowance one correction at a time.
+    max_model_requests_per_run: int = Field(default=6, alias="AI_MAX_REQUESTS_PER_RUN")
     max_model_requests_per_day: int = Field(default=400, alias="AI_MAX_REQUESTS_PER_DAY")
     #: Starts allowed for one anonymous browser session in an India calendar day.
     max_migration_starts_per_session_per_day: int = Field(

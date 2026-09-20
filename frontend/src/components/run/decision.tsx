@@ -37,6 +37,7 @@ export function Decision({
 }) {
   const [picked, setPicked] = useState<string | null>(null);
   const [typed, setTyped] = useState("");
+  const [remember, setRemember] = useState(false);
   const typedRef = useRef<HTMLInputElement>(null);
 
   // A different question is a different decision: nothing carries over.
@@ -45,6 +46,7 @@ export function Decision({
     setOwnerId(question.id);
     setPicked(null);
     setTyped("");
+    setRemember(false);
   }
 
   const needsTyping = picked !== null && picked === question.typedOption;
@@ -61,12 +63,21 @@ export function Decision({
 
     // The action tells the engine what kind of decision this is; it revalidates
     // either way, so a typed value is a proposal rather than an override.
+    // `remember` is a pre-authorisation, not a second decision. It lets a rule
+    // drawn from this answer apply to the rest of the run without interrupting the
+    // person twice for one judgement; without it the rule is still drafted, it just
+    // waits until the run is over.
     if (picked === question.typedOption) {
-      onSave({ action: "correct", option_id: picked, value: typed.trim() });
+      onSave({ action: "correct", option_id: picked, value: typed.trim(), remember });
     } else if (picked.startsWith("exclude")) {
-      onSave({ action: "exclude", option_id: picked });
+      onSave({ action: "exclude", option_id: picked, remember: false });
     } else {
-      onSave({ action: "approve", option_id: picked, value: option.value ?? null });
+      onSave({
+        action: "approve",
+        option_id: picked,
+        value: option.value ?? null,
+        remember,
+      });
     }
   };
 
@@ -161,6 +172,26 @@ export function Decision({
               question stays open.
             </p>
           </div>
+        )}
+
+        {ready && !picked?.startsWith("exclude") && (
+          <label className="mt-5 flex cursor-pointer items-start gap-2.5 rounded-md border border-line bg-sunken/50 px-3.5 py-3">
+            <input
+              type="checkbox"
+              checked={remember}
+              onChange={(event) => setRemember(event.target.checked)}
+              className="mt-0.5 size-4 shrink-0 accent-accent"
+            />
+            <span>
+              <span className="block text-[13px] font-medium">
+                Remember this for future migrations
+              </span>
+              <span className="mt-0.5 block text-[12.5px] text-ink-muted">
+                A rule is drafted from your answer and checked against the schema. You
+                see it before it is saved, and can turn it off at any time.
+              </span>
+            </span>
+          </label>
         )}
 
         <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-line pt-4">

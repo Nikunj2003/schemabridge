@@ -40,6 +40,7 @@ from schemabridge.domain.normalize import (
     parse_calendar_date,
     trim_surrounding,
 )
+from schemabridge.domain.rules import EMPTY_RULES, RuleSet
 from schemabridge.domain.schema import TargetSchema, ValueKind
 
 
@@ -90,7 +91,9 @@ def _subject(group: _Group, schema: TargetSchema) -> str:
     return group.id
 
 
-def canonical_meaning(field_name: str, value: str, *, schema: TargetSchema) -> str | None:
+def canonical_meaning(
+    field_name: str, value: str, *, schema: TargetSchema, rules: RuleSet = EMPTY_RULES
+) -> str | None:
     """Reduce a value to what it means, so spellings do not read as conflicts.
 
     Returns None when there is no safe canonical form — an ambiguous date, or an
@@ -109,7 +112,7 @@ def canonical_meaning(field_name: str, value: str, *, schema: TargetSchema) -> s
         parsed = parse_calendar_date(trimmed)
         return parsed.value if parsed.status is DateStatus.PARSED else None
     if spec.kind is ValueKind.ENUM:
-        return normalize_enum_value(spec.name, trimmed, schema=schema)
+        return normalize_enum_value(spec.name, trimmed, schema=schema, rules=rules)
     if spec.kind is ValueKind.EMAIL:
         at = trimmed.rfind("@")
         if at <= 0:
@@ -118,18 +121,28 @@ def canonical_meaning(field_name: str, value: str, *, schema: TargetSchema) -> s
     return trimmed
 
 
-def _equivalent(field_name: str, left: str, right: str, schema: TargetSchema) -> bool:
-    """Whether two values assert the same fact, allowing for spelling."""
+def _equivalent(
+    field_name: str, left: str, right: str, schema: TargetSchema, rules: RuleSet = EMPTY_RULES
+) -> bool:
+    """Whether two values assert the same fact, allowing for spelling.
+
+    A learned rule can make two spellings agree that the shipped vocabulary would
+    have called a conflict — which is the point of teaching one. It cannot make
+    genuinely different facts agree: the rule only supplies a canonical form, and
+    two different canonical forms still conflict.
+    """
     if trim_surrounding(left) == trim_surrounding(right):
         return True
-    left_meaning = canonical_meaning(field_name, left, schema=schema)
-    right_meaning = canonical_meaning(field_name, right, schema=schema)
+    left_meaning = canonical_meaning(field_name, left, schema=schema, rules=rules)
+    right_meaning = canonical_meaning(field_name, right, schema=schema, rules=rules)
     if left_meaning is None or right_meaning is None:
         return False
     return left_meaning == right_meaning
 
 
-def _group_rows(rows: Sequence[IncomingRow], schema: TargetSchema) -> tuple[list[_Group], int]:
+def _group_rows(
+    rows: Sequence[IncomingRow], schema: TargetSchema, rules: RuleSet = EMPTY_RULES
+) -> tuple[list[_Group], int]:
     groups: list[_Group] = []
     by_key: dict[str, _Group] = {}
     merged = 0
@@ -163,10 +176,10 @@ def _group_rows(rows: Sequence[IncomingRow], schema: TargetSchema) -> tuple[list
                 continue
             if is_blank(value) or is_blank(current) or current is None or value is None:
                 continue
-            if _equivalent(name, current, value, schema):
+            if _equivalent(name, current, value, schema, rules):
                 # Same fact, different spelling. Store the canonical form so the
                 # merged record does not depend on which file was read first.
-                canonical = canonical_meaning(name, current, schema=schema)
+                canonical = canonical_meaning(name, current, schema=schema, rules=rules)
                 if canonical:
                     existing.values[name] = canonical
                 continue
@@ -218,7 +231,9 @@ def _conflict_issue(
 
 
 def _duplicate_value_issues(
-    records: Sequence[CanonicalRecord], schema: TargetSchema
+    records: Sequence[CanonicalRecord],
+    schema: TargetSchema,
+    rules: RuleSet = EMPTY_RULES,
 ) -> list[ReviewIssue]:
     """Two records sharing a value the schema says should be unique.
 
@@ -243,7 +258,7 @@ def _duplicate_value_issues(
             if is_blank(raw) or raw is None:
                 continue
             # Compared on meaning, so "A@x.com" and "a@X.com" count as one.
-            canonical = canonical_meaning(name, raw, schema=schema)
+            canonical = canonical_meaning(name, raw, schema=schema, rules=rules)
             if canonical is None or not canonical:
                 continue
             grouped.setdefault(canonical.lower(), []).append(record.id)
@@ -286,9 +301,11 @@ def _duplicate_value_issues(
     return issues
 
 
-def reconcile_identities(rows: Sequence[IncomingRow], *, schema: TargetSchema) -> ReconcileResult:
+def reconcile_identities(
+    rows: Sequence[IncomingRow], *, schema: TargetSchema, rules: RuleSet = EMPTY_RULES
+) -> ReconcileResult:
     """Collapse rows into one record per identity, escalating real disagreements."""
-    groups, merged_rows = _group_rows(rows, schema)
+    groups, merged_rows = _group_rows(rows, schema, rules)
 
     issues: list[ReviewIssue] = []
     records: list[CanonicalRecord] = []
@@ -309,5 +326,5 @@ def reconcile_identities(rows: Sequence[IncomingRow], *, schema: TargetSchema) -
             )
         )
 
-    issues.extend(_duplicate_value_issues(records, schema))
+    issues.extend(_duplicate_value_issues(records, schema, rules))
     return ReconcileResult(records=tuple(records), issues=tuple(issues), merged_rows=merged_rows)

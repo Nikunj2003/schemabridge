@@ -342,13 +342,20 @@ export interface RulePreview {
   would_change: number;
 }
 
-/** A rule the model proposes from a decision the reviewer already made. */
+/**
+ * A rule the engine offers to remember, from a decision or a verified model mapping.
+ *
+ * The provenance lives on `rule`, not here: it describes where the rule came from and
+ * travels with it once saved. An earlier version declared a non-null `provenance` on
+ * the proposal itself, which the API never sends — reading it crashed the whole run
+ * page, so the card looked like it was simply missing.
+ */
 export interface ProposedRule {
   proposal_id: string;
   rule: Rule;
   scope: "value" | "column";
   rationale: string;
-  provenance: RuleProvenance;
+  pre_approved?: boolean;
 }
 
 export class ApiError extends Error {

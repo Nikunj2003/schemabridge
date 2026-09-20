@@ -109,7 +109,10 @@ export function RulesList() {
   // rules in force for a run against it.
   const learned = listing?.mine.filter((rule) => rule.origin === "learned") ?? [];
   const written = listing?.mine.filter((rule) => rule.origin === "handwritten") ?? [];
-  const overrides = listing?.mine.filter((rule) => rule.origin === "override") ?? [];
+  // Only overrides still in force. Filtering on origin alone kept showing one the
+  // reader had already turned back on, which read as the button doing nothing.
+  const overrides =
+    listing?.mine.filter((rule) => rule.origin === "override" && rule.enabled) ?? [];
   const current = schemas.find((candidate) => candidate.schema_id === schemaId);
 
   return (
@@ -275,11 +278,16 @@ export function RulesList() {
                       size="sm"
                       variant="quiet"
                       className="ml-auto"
-                      disabled={busy === rule.rule_id}
+                      disabled={busy === rule.targets_rule_id}
                       onClick={() =>
                         void act(
-                          rule.rule_id,
-                          () => api.rules.toggle(rule.rule_id, false),
+                          rule.targets_rule_id,
+                          // Addressed by the shipped rule it disables, not by the
+                          // override's own id: only the `builtin:` branch of the
+                          // route knows how to clear an override, and sending the
+                          // override's id merely disabled the override itself while
+                          // leaving the shipped rule off.
+                          () => api.rules.toggle(rule.targets_rule_id, true, schemaId),
                           "The rule could not be restored.",
                           { reload: true },
                         )
@@ -299,13 +307,15 @@ export function RulesList() {
             onToggle={(rule) =>
               void act(
                 rule.rule_id,
-                // `enabled` on the request means "should this shipped rule apply",
-                // so turning it back on sends true and clearing the override follows.
+                // `enabled` means "should this shipped rule apply", so turning it
+                // back on sends true and the route clears the override.
                 () => api.rules.toggle(rule.rule_id, rule.overridden, schemaId),
                 rule.overridden
                   ? "The rule could not be turned back on."
                   : "The rule could not be turned off.",
-                { overridden: !rule.overridden },
+                // Reloaded, not patched: this action adds or removes a row in the
+                // "turned off" list, and a patch can only change a row in place.
+                { reload: true },
               )
             }
           />

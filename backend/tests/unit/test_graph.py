@@ -20,6 +20,7 @@ from schemabridge.domain.models import (
     SourceFile,
     SourceRow,
 )
+from schemabridge.domain.rules import RuleOrigin
 from schemabridge.domain.target import BUILTIN_SCHEMA
 from schemabridge.graph.builder import compile_graph
 from schemabridge.graph.state import MigrationState
@@ -135,15 +136,17 @@ class TestCleanRunNeedsNoHuman:
         # An agent actor does not imply model use: this run followed policy only.
         assert {e.execution_basis for e in result["events"]} == {EventExecutionBasis.DETERMINISTIC}
 
-    def _assist(self, monkeypatch: pytest.MonkeyPatch, outcome: Any) -> tuple[Any, ...]:
+    def _assist_result(self, monkeypatch: pytest.MonkeyPatch, outcome: Any) -> dict[str, Any]:
         """Run the model-assistance node against a fixed proposal outcome."""
         from schemabridge.graph import nodes
 
         state = initial_state(["employees-clean.csv"])
         state["unresolved_columns"] = (state["columns"][0].id,)
         monkeypatch.setattr(nodes, "propose_unresolved_mappings", lambda *_a, **_k: outcome)
-        result = nodes.assist_with_model(cast(MigrationState, state))
-        return tuple(result["events"])
+        return nodes.assist_with_model(cast(MigrationState, state))
+
+    def _assist(self, monkeypatch: pytest.MonkeyPatch, outcome: Any) -> tuple[Any, ...]:
+        return tuple(self._assist_result(monkeypatch, outcome)["events"])
 
     def test_model_assistance_records_its_own_execution_basis(
         self, monkeypatch: pytest.MonkeyPatch
@@ -167,11 +170,60 @@ class TestCleanRunNeedsNoHuman:
             ),
         )
 
-        # The call itself is recorded first, then what it produced, so the trail
-        # reads in the order the work actually happened.
-        assert [e.action for e in events] == ["model_requested", "mapping_applied"]
+        # The call, then what it produced, then the offer to remember it — the order
+        # the work actually happened in. The proposal is deterministic: the model made
+        # its judgement when the suggestion was verified, and drafting a rule from a
+        # mapping already in hand costs no second request.
+        assert [e.action for e in events] == [
+            "model_requested",
+            "mapping_applied",
+            "rule_proposed",
+        ]
         assert [e.seq for e in events] == sorted(e.seq for e in events)
-        assert {e.execution_basis for e in events} == {EventExecutionBasis.MODEL_ASSISTED}
+
+        by_action = {e.action: e.execution_basis for e in events}
+        assert by_action["model_requested"] is EventExecutionBasis.MODEL_ASSISTED
+        assert by_action["mapping_applied"] is EventExecutionBasis.MODEL_ASSISTED
+        # Deterministic, and deliberately so: the rule was drafted from a mapping the
+        # verifier had already accepted, without consulting the model again.
+        assert by_action["rule_proposed"] is EventExecutionBasis.DETERMINISTIC
+
+    def test_a_verified_model_mapping_is_offered_as_a_rule(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The case that makes learning reachable at all.
+
+        Every question that reaches a person is one no rule may settle — an ambiguous
+        header is meant to be asked — so if learning drew only on human decisions it
+        could never fire. A mapping the model placed and the verifier confirmed is the
+        opposite: a header the rules could not handle, an answer already checked, and a
+        request already paid for.
+        """
+        from schemabridge.agent.propose import AcceptedMapping, ProposalOutcome
+
+        state = initial_state(["employees-clean.csv"])
+        column_id = state["columns"][0].id
+        result = self._assist_result(
+            monkeypatch,
+            ProposalOutcome(
+                accepted=(
+                    AcceptedMapping(
+                        column_id=column_id,
+                        target="employeeId",
+                        evidence=("Model suggestion, confirmed by deterministic checks.",),
+                    ),
+                ),
+                requests_used=1,
+                considered=(column_id,),
+            ),
+        )
+        proposals = result.get("proposed_rules", ())
+        assert len(proposals) == 1
+        proposed = proposals[0].rule
+        assert proposed.field_name == "employeeId"
+        assert proposed.origin is RuleOrigin.LEARNED
+        # Offered, never applied: a rule nobody approved must not affect anything.
+        assert proposed.rule_id == ""
 
     def test_a_request_whose_suggestions_were_all_refused_is_still_marked(
         self, monkeypatch: pytest.MonkeyPatch

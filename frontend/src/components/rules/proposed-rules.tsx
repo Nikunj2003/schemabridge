@@ -72,9 +72,9 @@ export function ProposedRules({
       <section className="panel mt-5 px-5 py-4">
         <h2 className="text-[14px] font-medium">Nothing worth remembering</h2>
         <p className="mt-1 max-w-[64ch] text-[12.5px] text-ink-muted">
-          Your decisions here were about this file rather than a pattern that would
-          recur, so no rule was drafted. The audit below says which, and why, for each
-          one. Nothing was saved.
+          Everything here was about this file rather than a pattern that would recur,
+          so no rule was drafted. The audit below says which, and why, for each one.
+          Nothing was saved.
         </p>
       </section>
     );
@@ -88,8 +88,8 @@ export function ProposedRules({
         <h2 className="text-[14px] font-medium">Worth remembering</h2>
         <p className="mt-0.5 max-w-[64ch] text-[12.5px] text-ink-muted">
           {savedCount > 0
-            ? `${savedCount} saved to ${schemaName}. Next time this export arrives, ${savedCount === 1 ? "that question is" : "those questions are"} not asked and no model request is spent on it.`
-            : `Your answers below would recur on the next export. Keep any of them and they join the rules for ${schemaName} — affecting migrations onto that schema and no other.`}
+            ? `${savedCount} saved to ${schemaName}. The next file like this one resolves ${savedCount === 1 ? "that column" : "those columns"} from the rule, with no model request and nothing to ask you.`
+            : `This migration worked out something it had to think about. Keeping it means the next file like this one does not have to. Rules join ${schemaName} and affect no other schema.`}
         </p>
       </div>
 
@@ -123,9 +123,11 @@ export function ProposedRules({
               {proposal.rationale && (
                 <p className="mt-0.5 text-[12.5px] text-ink-muted">{proposal.rationale}</p>
               )}
-              {proposal.provenance.decision && (
+              {proposal.rule.provenance?.decision && (
                 <p className="mt-0.5 text-[12px] text-ink-subtle">
-                  Drawn from your answer: “{proposal.provenance.decision}”.
+                  {proposal.rule.provenance.issue_id
+                    ? `Drawn from your answer: “${proposal.rule.provenance.decision}”.`
+                    : proposal.rule.provenance.decision}
                 </p>
               )}
 

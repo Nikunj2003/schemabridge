@@ -294,3 +294,72 @@ def propose_rule_from_decision(
         1,
         None,
     )
+
+
+def propose_rule_from_model_mapping(
+    header: str,
+    target: str,
+    evidence: tuple[str, ...],
+    *,
+    schema: TargetSchema,
+    run_id: str,
+) -> ProposedRule | None:
+    """Draft a rule from a mapping the model proposed and the verifier accepted.
+
+    This is the cheapest and most useful rule the system can offer, and for a long
+    time it was the one it could not reach. The reason was a circularity worth
+    recording: a rule can only help where the engine had to ask or to guess, but the
+    questions that reach a person are the ones no rule may settle — an ambiguous
+    header is meant to be asked — while the cases a rule *could* settle are exactly
+    the ones the model quietly resolves, so nobody is ever asked and nothing is ever
+    learned. The feature was unreachable on every sample file.
+
+    An accepted model mapping breaks that. It is a header the deterministic rules
+    could not place, a target the verifier independently confirmed, and it cost a
+    request that has already been spent. Turning it into a rule costs nothing more
+    and means the next export with that header needs no model at all.
+
+    No model call here, deliberately: the judgement was made when the suggestion was
+    verified, and asking again would spend a second request to re-derive an answer
+    already in hand.
+    """
+    if not header or not target:
+        return None
+
+    try:
+        rule = Rule(
+            kind=RuleKind.HEADER_ALIAS,
+            origin=RuleOrigin.LEARNED,
+            header=header,
+            field_name=target,
+            schema_id=schema.schema_id,
+            rationale=(
+                f'The model matched "{header}" to this field and the checks agreed. '
+                f"Keeping it means the next file with that column needs no model request."
+            ),
+        )
+    except ValueError:
+        return None
+
+    try:
+        check_against_schema(rule, schema)
+    except RuleRejectedError:
+        # Most likely an ambiguous header, which must stay a question.
+        return None
+
+    return ProposedRule(
+        proposal_id=f"prop_{secrets.token_urlsafe(6)}",
+        rule=rule.model_copy(
+            update={
+                "provenance": RuleProvenance(
+                    run_id=run_id,
+                    issue_id="",
+                    decision=evidence[-1] if evidence else "Verified model suggestion.",
+                )
+            }
+        ),
+        # Mapping is settled before records exist, so this cannot help the run that
+        # produced it — only the next one.
+        scope=RuleScope.COLUMN,
+        rationale=rule.rationale,
+    )

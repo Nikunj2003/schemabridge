@@ -18,7 +18,10 @@ from typing import Any
 
 from langgraph.types import interrupt
 
-from schemabridge.agent.induce import propose_rule_from_decision
+from schemabridge.agent.induce import (
+    propose_rule_from_decision,
+    propose_rule_from_model_mapping,
+)
 from schemabridge.agent.propose import propose_unresolved_mappings
 from schemabridge.domain.identity import IncomingRow, reconcile_identities
 from schemabridge.domain.mapping import POLICY_VERSION, decide_mappings
@@ -246,6 +249,7 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
     by_id = {column.id: column for column in columns}
     added: list[MappingDecision] = []
     events: list[AuditEvent] = []
+    proposals: list[ProposedRule] = []
 
     # The call itself, recorded where it happened. Without this a request whose
     # every suggestion the verifier then refused would leave no trace of the model
@@ -295,6 +299,35 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
             )
         )
         seq += 1
+
+        # Offer to remember it. The model placed a header the rules could not, and
+        # the verifier agreed independently, so this is the clearest case there is —
+        # and it needs no further model request, because the judgement has been made.
+        proposal = propose_rule_from_model_mapping(
+            header,
+            accepted.target,
+            accepted.evidence,
+            schema=schema,
+            run_id=str(state.get("run_id", "")),
+        )
+        if proposal is not None:
+            proposals.append(proposal)
+            events.append(
+                _event(
+                    seq,
+                    "rule_proposed",
+                    (
+                        f'Keeping a rule for "{header}" would let the next file with '
+                        f"that column skip the model entirely. Nothing changes until "
+                        f"you approve it."
+                    ),
+                    execution_basis=EventExecutionBasis.DETERMINISTIC,
+                    subject=header,
+                    scope=proposal.scope.value,
+                    rule_kind=proposal.rule.kind.value,
+                )
+            )
+            seq += 1
 
     for column_id, why in outcome.rejected:
         header = by_id[column_id].header if column_id in by_id else column_id
@@ -375,6 +408,7 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
         "issues": tuple(issues),
         "unresolved_columns": still_unresolved,
         "events": tuple(events),
+        "proposed_rules": tuple(proposals),
         "model_requests": state.get("model_requests", 0) + outcome.requests_used,
     }
 

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 import { Wordmark } from "@/components/brand/logo";
 import { useWorkspace } from "@/components/auth/workspace-provider";
 
@@ -9,6 +10,24 @@ import { useWorkspace } from "@/components/auth/workspace-provider";
 export default function SignInPage() {
   const router = useRouter();
   const { configured, signInWithGoogle, switchToSharedWorkspace } = useWorkspace();
+  /**
+   * Which choice is in flight.
+   *
+   * Neither button acknowledged a click. Measured on the deployed app, the guest
+   * path takes ~0.7s to reach /app and Google ~1.0s before the browser leaves —
+   * the SDK fetches OIDC metadata first — and for that whole second the page
+   * looked unresponsive, so people press again. Naming the pending choice also
+   * makes the second press a no-op rather than a second redirect.
+   */
+  const [pending, setPending] = useState<"google" | "guest" | null>(null);
+
+  useEffect(() => {
+    // Warm the destination. Both choices land in /app, and nothing on this page
+    // links there, so without this the route's chunk is fetched only once the
+    // button is pressed — which was most of the delay, not just an unacknowledged
+    // click. Cheap and idempotent; failure only costs the head start.
+    router.prefetch("/app");
+  }, [router]);
 
   return (
     <div className="flex min-h-dvh flex-col">
@@ -23,11 +42,26 @@ export default function SignInPage() {
           </p>
           <div className="panel mt-7 space-y-3 px-5 py-6">
             <button
-              onClick={() => void signInWithGoogle()}
-              disabled={!configured}
-              className="flex h-11 w-full items-center justify-center gap-3 rounded-md border border-line-strong bg-surface text-[14.5px] font-medium disabled:opacity-55"
+              onClick={() => {
+                if (pending) return;
+                setPending("google");
+                // If the redirect fails the page stays put, so the button has to
+                // become pressable again rather than stay stuck on "Redirecting".
+                void signInWithGoogle().catch(() => setPending(null));
+              }}
+              disabled={!configured || pending !== null}
+              aria-busy={pending === "google"}
+              className="flex h-11 w-full items-center justify-center gap-3 rounded-md border border-line-strong bg-surface text-[14.5px] font-medium transition-colors hover:bg-sunken active:bg-sunken disabled:cursor-not-allowed disabled:opacity-55 disabled:hover:bg-surface"
             >
-              <GoogleMark /> Continue with Google
+              {pending === "google" ? (
+                <>
+                  <Spinner /> Redirecting to Google…
+                </>
+              ) : (
+                <>
+                  <GoogleMark /> Continue with Google
+                </>
+              )}
             </button>
             {!configured && (
               <p className="text-center text-[12.5px] text-ink-muted">
@@ -37,12 +71,22 @@ export default function SignInPage() {
             <div className="my-1 h-px bg-line" />
             <button
               onClick={() => {
+                if (pending) return;
+                setPending("guest");
                 switchToSharedWorkspace();
                 router.push("/app");
               }}
-              className="h-11 w-full rounded-md border border-line bg-sunken text-[14px] font-medium text-ink-muted hover:bg-surface"
+              disabled={pending !== null}
+              aria-busy={pending === "guest"}
+              className="flex h-11 w-full items-center justify-center gap-2 rounded-md border border-line bg-sunken text-[14px] font-medium text-ink-muted transition-colors hover:bg-surface hover:text-ink active:bg-surface disabled:cursor-not-allowed disabled:opacity-60"
             >
-              Continue in shared anonymous workspace
+              {pending === "guest" ? (
+                <>
+                  <Spinner /> Opening the shared workspace…
+                </>
+              ) : (
+                "Continue in shared anonymous workspace"
+              )}
             </button>
             <p className="text-center text-[12.5px] leading-relaxed text-ink-muted">
               Anonymous migrations, records, rules, and audit entries are visible to everyone using this shared workspace and are deleted after two days.
@@ -54,6 +98,16 @@ export default function SignInPage() {
         </div>
       </main>
     </div>
+  );
+}
+
+/** A quiet indeterminate spinner, so a pending click is visibly pending. */
+function Spinner() {
+  return (
+    <svg viewBox="0 0 24 24" className="size-4 shrink-0 animate-spin" fill="none" aria-hidden>
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.5" opacity="0.25" />
+      <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+    </svg>
   );
 }
 

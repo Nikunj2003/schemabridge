@@ -305,6 +305,14 @@ export interface Rule {
 export interface RuleView extends Rule {
   editable: boolean;
   version: number;
+  /**
+   * Whether the caller has turned this shipped rule off for themselves.
+   *
+   * Distinct from `enabled`, which describes the rule itself. A shipped rule is
+   * always enabled — the engine has no row to disable — so "off for me" is carried
+   * separately and expressed as an override the caller owns.
+   */
+  overridden: boolean;
 }
 
 export interface RuleListing {

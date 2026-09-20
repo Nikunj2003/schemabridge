@@ -33,11 +33,21 @@ export function Label({
   hint?: string;
   className?: string;
 }) {
+  // The hint sits on its own line rather than trailing the label inline. Inline, a
+  // hint long enough to wrap made the label two lines tall for one control and one
+  // line for its neighbour, so a two-column row visibly lost its alignment. Stacked,
+  // every control in a row starts at the same place whatever its hint says.
   return (
-    <label htmlFor={htmlFor} className={cn("block text-[12.5px] font-medium text-ink", className)}>
-      {children}
-      {hint && <span className="ml-1.5 font-normal text-ink-subtle">{hint}</span>}
-    </label>
+    <span className={cn("block", className)}>
+      <label htmlFor={htmlFor} className="block text-[12.5px] font-medium text-ink">
+        {children}
+      </label>
+      {hint && (
+        <span className="mt-0.5 block text-[12px] font-normal leading-snug text-ink-subtle">
+          {hint}
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -59,7 +69,7 @@ export function Input({
   const id = props.id ?? generated;
   const errorId = `${id}-error`;
   return (
-    <div className={className}>
+    <div className={cn("flex flex-col", className)}>
       {label && (
         <Label htmlFor={id} hint={hint} className="mb-1">
           {label}
@@ -69,7 +79,7 @@ export function Input({
         id={id}
         aria-invalid={error ? true : undefined}
         aria-describedby={error ? errorId : undefined}
-        className={cn(CONTROL, border(!!error), mono && "raw")}
+        className={cn(CONTROL, "mt-auto", border(!!error), mono && "raw")}
         {...props}
       />
       {error && (
@@ -96,7 +106,7 @@ export function Textarea({
   const id = props.id ?? generated;
   const errorId = `${id}-error`;
   return (
-    <div className={className}>
+    <div className={cn("flex flex-col", className)}>
       {label && (
         <Label htmlFor={id} hint={hint} className="mb-1">
           {label}
@@ -106,7 +116,7 @@ export function Textarea({
         id={id}
         aria-invalid={error ? true : undefined}
         aria-describedby={error ? errorId : undefined}
-        className={cn(CONTROL, border(!!error), "resize-y")}
+        className={cn(CONTROL, "mt-auto", border(!!error), "resize-y")}
         {...props}
       />
       {error && (
@@ -133,13 +143,13 @@ export function Select({
   const generated = useId();
   const id = props.id ?? generated;
   return (
-    <div className={className}>
+    <div className={cn("flex flex-col", className)}>
       {label && (
         <Label htmlFor={id} hint={hint} className="mb-1">
           {label}
         </Label>
       )}
-      <div className="relative">
+      <div className="relative mt-auto">
         <select
           id={id}
           aria-invalid={error ? true : undefined}

@@ -570,6 +570,7 @@ def induce_rules(state: MigrationState) -> dict[str, Any]:
         return {}
 
     issues = {issue.id: issue for issue in state.get("issues", ())}
+    headers = {column.id: column.header for column in state.get("columns", ())}
     schema = run_schema(state)
     run_id = str(state.get("run_id", ""))
     spent = int(state.get("model_requests", 0))
@@ -596,6 +597,9 @@ def induce_rules(state: MigrationState) -> dict[str, Any]:
             chosen,
             schema=schema,
             run_id=run_id,
+            # So a decision about a column the schema itself makes ambiguous is
+            # filtered before a request is spent on a rule that cannot be accepted.
+            column_header=headers.get(issue.column_id or "", ""),
             requests_used_in_run=spent,
             pre_approved=pre_approved,
         )
@@ -616,20 +620,25 @@ def induce_rules(state: MigrationState) -> dict[str, Any]:
             )
             seq += 1
 
-        if unavailable:
+        if proposal is None:
+            # Recorded either way. A request shown in the trail with nothing after it
+            # reads as a failure, and a refusal a reviewer cannot see is a refusal
+            # they cannot trust.
             events.append(
                 _event(
                     seq,
-                    "rule_induction_unavailable",
-                    unavailable,
+                    "rule_not_proposed" if used > 0 else "rule_induction_skipped",
+                    unavailable
+                    or (
+                        "No rule was drafted from this decision: it is about this "
+                        "file rather than a pattern that would recur."
+                    ),
                     execution_basis=EventExecutionBasis.DETERMINISTIC,
                     actor=Actor.SYSTEM,
+                    subject=issue.id,
                 )
             )
             seq += 1
-            continue
-
-        if proposal is None:
             continue
 
         proposals.append(proposal)

@@ -1,11 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "@/components/ui/status";
 import { Button, ButtonLink } from "@/components/ui/button";
+import { Input } from "@/components/ui/field";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type RuleListing, type RuleView, type TargetSchema } from "@/lib/api";
-import { KIND_LABEL, ORIGIN_LABEL, describeRule } from "@/lib/rules";
+import { KIND_LABEL, ORIGIN_LABEL, describeRule, normalizeHeader } from "@/lib/rules";
+import { cn } from "@/lib/utils";
 
 /**
  * Everything the engine knows, and where each piece came from.
@@ -24,7 +26,6 @@ export function RulesList() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
-  const [showBuiltin, setShowBuiltin] = useState(false);
   const [schemas, setSchemas] = useState<TargetSchema[]>([]);
   // Which contract's rules are on screen. A rule only ever affects migrations onto
   // one schema, so showing them all at once would answer the wrong question: what a
@@ -70,12 +71,33 @@ export function RulesList() {
     };
   }, [schemaId]);
 
-  const act = async (id: string, work: () => Promise<unknown>, failure: string) => {
+  /**
+   * Run one action and fold its result back into the row it belongs to.
+   *
+   * Deliberately not a refetch. Re-reading the whole listing to reflect one
+   * toggle threw away 193 rendered rows and the reader's scroll position, which
+   * read as a page reload for what is a one-field change. The endpoint returns the
+   * updated rule, so the row it describes is replaced and nothing else moves.
+   *
+   * A delete has no updated row to return, so that one does reload — there is no
+   * way to represent a removal by patching a row.
+   */
+  const act = async (
+    id: string,
+    work: () => Promise<RuleView | void>,
+    failure: string,
+    { reload = false, overridden }: { reload?: boolean; overridden?: boolean } = {},
+  ) => {
     setBusy(id);
+    setError(null);
     try {
-      await work();
+      const updated = await work();
       setConfirming(null);
-      await load();
+      if (reload || !updated) {
+        await load();
+        return;
+      }
+      setListing((current) => (current ? patchRule(current, id, updated, overridden) : current));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : failure);
     } finally {
@@ -121,7 +143,6 @@ export function RulesList() {
               onClick={() => {
                 setSchemaId(candidate.schema_id);
                 setListing(null);
-                setShowBuiltin(false);
               }}
               className={
                 candidate.schema_id === schemaId
@@ -193,6 +214,7 @@ export function RulesList() {
                         rule.rule_id,
                         () => api.rules.remove(rule.rule_id),
                         "The rule could not be deleted.",
+                        { reload: true },
                       )
                     }
                   />
@@ -230,6 +252,7 @@ export function RulesList() {
                         rule.rule_id,
                         () => api.rules.remove(rule.rule_id),
                         "The rule could not be deleted.",
+                        { reload: true },
                       )
                     }
                   />
@@ -258,6 +281,7 @@ export function RulesList() {
                           rule.rule_id,
                           () => api.rules.toggle(rule.rule_id, false),
                           "The rule could not be restored.",
+                          { reload: true },
                         )
                       }
                     >
@@ -269,49 +293,237 @@ export function RulesList() {
             </section>
           )}
 
-          <section className="mt-7">
-            <div className="flex items-baseline justify-between gap-3">
-              <h2 className="eyebrow">Built in</h2>
-              <span className="text-[12px] text-ink-subtle tnum">{listing.builtin.length}</span>
-            </div>
-            <p className="mt-1.5 max-w-[62ch] text-[13px] text-ink-muted">
-              These come from the engine itself, so there is nothing to edit — but you
-              can turn one off if it is wrong for your data. Headers that two fields
-              both claim are deliberately absent: those are what make a column
-              ambiguous, and a rule settling one would remove a question you want.
+          <BuiltinRules
+            rules={listing.builtin}
+            busy={busy}
+            onToggle={(rule) =>
+              void act(
+                rule.rule_id,
+                // `enabled` on the request means "should this shipped rule apply",
+                // so turning it back on sends true and clearing the override follows.
+                () => api.rules.toggle(rule.rule_id, rule.overridden, schemaId),
+                rule.overridden
+                  ? "The rule could not be turned back on."
+                  : "The rule could not be turned off.",
+                { overridden: !rule.overridden },
+              )
+            }
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Fold one action's result back into the listing, leaving every other row alone.
+ *
+ * A shipped rule is a special case worth spelling out. Toggling one does not change
+ * that rule — it cannot, it comes from code — it creates or clears an *override*,
+ * which is a different rule with its own id. So the shipped row is marked
+ * `overridden` rather than replaced with what the endpoint returned; replacing it
+ * turned a header alias into "a built-in rule is turned off", which is both wrong
+ * and impossible to undo from the row.
+ */
+function patchRule(
+  listing: RuleListing,
+  ruleId: string,
+  updated: RuleView,
+  overridden?: boolean,
+): RuleListing {
+  if (ruleId.startsWith("builtin:")) {
+    return {
+      ...listing,
+      builtin: listing.builtin.map((rule) =>
+        rule.rule_id === ruleId ? { ...rule, overridden: overridden ?? true } : rule,
+      ),
+    };
+  }
+  const swap = (rule: RuleView) => (rule.rule_id === ruleId ? { ...rule, ...updated } : rule);
+  return { ...listing, builtin: listing.builtin.map(swap), mine: listing.mine.map(swap) };
+}
+
+/** How many shipped rules to render before the reader asks for more. */
+const BUILTIN_PAGE = 30;
+
+/**
+ * The rules the engine ships with.
+ *
+ * Nearly two hundred of them, which is why this is not a plain list. Rendering all
+ * of them at once was visibly slow, and the reason is boring: each row carries a
+ * badge, a generated sentence and a button, so the cost is in the node count rather
+ * than in anything that can be optimised away. So the list renders a page at a time
+ * and grows on request.
+ *
+ * The search box matters more than the paging. Nobody scrolls two hundred rules
+ * looking for one; they know the header they care about. Filtering is on the same
+ * normalised form the engine matches on, so what the box finds is what would fire.
+ */
+function BuiltinRules({
+  rules,
+  busy,
+  onToggle,
+}: {
+  rules: RuleView[];
+  busy: string | null;
+  onToggle: (rule: RuleView) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [shown, setShown] = useState(BUILTIN_PAGE);
+  const listRef = useRef<HTMLUListElement>(null);
+  // The reader's own scroll position, tracked continuously.
+  //
+  // It cannot be read in the click handler: the browser scrolls this container to
+  // the top before React's handler runs, so `scrollTop` there is already 0. That
+  // cost three wrong fixes before the probe showed it, so the offset is captured as
+  // the reader scrolls and a jump to 0 is never believed.
+  const keptScroll = useRef(0);
+  const restoring = useRef(false);
+
+  // Disabling the button under the pointer takes focus off it, and the browser
+  // answers by scrolling this container back to the top. The row updates in place
+  // and the node is never remounted, so the only thing lost is the offset — which is
+  // enough to make a correct in-place update feel like a page reload.
+  //
+  // Captured in the click handler rather than in an effect: by the time an effect
+  // runs the browser has already scrolled, so there is nothing left to remember.
+  // A layout effect, so the offset is put back in the same frame the browser
+  // cleared it and the list never visibly jumps. `useEffect` runs after paint, which
+  // showed as a flick to the top and back.
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (!list || !restoring.current || keptScroll.current === 0) return;
+    list.scrollTop = keptScroll.current;
+    if (list.scrollTop === keptScroll.current) restoring.current = false;
+  });
+
+  const matching = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return rules;
+    return rules.filter(
+      (rule) =>
+        rule.header.includes(normalizeHeader(needle)) ||
+        rule.field_name.toLowerCase().includes(needle) ||
+        rule.value.includes(normalizeHeader(needle)) ||
+        rule.canonical.toLowerCase().includes(needle),
+    );
+  }, [rules, query]);
+
+  const visible = matching.slice(0, shown);
+  const disabledCount = rules.filter((rule) => rule.overridden).length;
+
+  return (
+    <section className="mt-7">
+      <div className="flex items-baseline justify-between gap-3">
+        <h2 className="eyebrow">Built in</h2>
+        <span className="text-[12px] text-ink-subtle tnum">
+          {disabledCount > 0 ? `${disabledCount} of ${rules.length} off` : rules.length}
+        </span>
+      </div>
+      <p className="mt-1.5 max-w-[62ch] text-[13px] text-ink-muted">
+        These come from the engine itself, so there is nothing to edit — but you can
+        turn one off if it is wrong for your data. Headers that two fields both claim
+        are deliberately absent: those are what make a column ambiguous, and a rule
+        settling one would remove a question you want.
+      </p>
+
+      {!open ? (
+        <Button variant="secondary" className="mt-3" onClick={() => setOpen(true)}>
+          Show {rules.length} built-in rules
+        </Button>
+      ) : (
+        <>
+          <div className="mt-3 flex flex-wrap items-center gap-2.5">
+            <Input
+              aria-label="Search built-in rules"
+              placeholder="Search a header or field…"
+              value={query}
+              className="min-w-[16rem] flex-1"
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setShown(BUILTIN_PAGE);
+              }}
+            />
+            <Button variant="quiet" onClick={() => setOpen(false)}>
+              Hide
+            </Button>
+          </div>
+
+          {matching.length === 0 ? (
+            <p className="panel mt-2.5 px-5 py-6 text-center text-[13px] text-ink-muted">
+              No built-in rule matches “{query.trim()}”. If your files use that
+              spelling, it is exactly what a rule of your own is for.
             </p>
-            {showBuiltin ? (
-              <ul className="panel mt-2.5 max-h-[28rem] divide-y divide-line overflow-hidden scroll-area">
-                {listing.builtin.map((rule) => (
-                  <li key={rule.rule_id} className="flex flex-wrap items-center gap-2.5 px-4 py-2.5">
+          ) : (
+            <>
+              {/* Height-capped and scrollable: `overflow-hidden` here previously
+                  clipped the list instead of letting it scroll, so the rules past
+                  the fold were unreachable. */}
+              <ul
+                ref={listRef}
+                className="panel scroll-area mt-2.5 max-h-[28rem] divide-y divide-line"
+                onScroll={(event) => {
+                  const top = event.currentTarget.scrollTop;
+                  // A jump to the very top during a toggle is the browser, not the
+                  // reader: it happens because the focused button is disabled.
+                  // Believing it is what loses the position.
+                  if (restoring.current && top === 0) return;
+                  keptScroll.current = top;
+                }}
+              >
+                {visible.map((rule) => (
+                  <li
+                    key={rule.rule_id}
+                    className="flex flex-wrap items-center gap-2.5 px-4 py-2.5"
+                  >
                     <Badge tone="neutral">{KIND_LABEL[rule.kind]}</Badge>
-                    <span className="min-w-0 flex-1 text-[13px]">{describeRule(rule)}</span>
+                    <span
+                      className={cn(
+                        "min-w-0 flex-1 text-[13px]",
+                        rule.overridden && "text-ink-subtle line-through",
+                      )}
+                    >
+                      {describeRule(rule)}
+                    </span>
+                    {rule.overridden && <Badge tone="attention">Off</Badge>}
                     <Button
                       size="sm"
                       variant="quiet"
                       disabled={busy === rule.rule_id}
-                      onClick={() =>
-                        void act(
-                          rule.rule_id,
-                          () => api.rules.toggle(rule.rule_id, false, schemaId),
-                          "The rule could not be turned off.",
-                        )
-                      }
+                      onClick={() => {
+                        // Remembered here because the browser scrolls this
+                        // container to the top the moment the button is disabled,
+                        // and by then the real offset is gone.
+                        restoring.current = true;
+                        onToggle(rule);
+                      }}
                     >
-                      Turn off
+                      {busy === rule.rule_id
+                        ? "Saving…"
+                        : rule.overridden
+                          ? "Turn back on"
+                          : "Turn off"}
                     </Button>
                   </li>
                 ))}
               </ul>
-            ) : (
-              <Button variant="secondary" className="mt-3" onClick={() => setShowBuiltin(true)}>
-                Show {listing.builtin.length} built-in rules
-              </Button>
-            )}
-          </section>
+
+              {visible.length < matching.length && (
+                <Button
+                  variant="quiet"
+                  className="mt-2.5"
+                  onClick={() => setShown((current) => current + BUILTIN_PAGE)}
+                >
+                  Show {Math.min(BUILTIN_PAGE, matching.length - visible.length)} more
+                  {query.trim() ? ` of ${matching.length} matching` : ` of ${rules.length}`}
+                </Button>
+              )}
+            </>
+          )}
         </>
       )}
-    </div>
+    </section>
   );
 }
 

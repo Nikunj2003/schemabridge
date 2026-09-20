@@ -82,7 +82,7 @@ class TestVerifier:
     """The half that runs after, judging what came back."""
 
     def test_a_sound_header_rule_is_accepted(self) -> None:
-        rule = _verified_rule(
+        rule, _ = _verified_rule(
             _draft(kind="header_alias", header="Cost Centre Ref", field_name="department"),
             SCHEMA,
         )
@@ -97,11 +97,11 @@ class TestVerifier:
         draft = _draft(
             generalises=False, kind="header_alias", header="Ref", field_name="department"
         )
-        assert _verified_rule(draft, SCHEMA) is None
+        assert _verified_rule(draft, SCHEMA)[0] is None
 
     def test_an_unknown_field_is_refused(self) -> None:
         draft = _draft(kind="header_alias", header="Ref", field_name="notAField")
-        assert _verified_rule(draft, SCHEMA) is None
+        assert _verified_rule(draft, SCHEMA)[0] is None
 
     def test_an_ambiguous_header_is_refused(self) -> None:
         """The one refusal that matters most.
@@ -112,7 +112,7 @@ class TestVerifier:
         """
         for header in ("Date", "dates", "Effective Date", "Contract Date"):
             draft = _draft(kind="header_alias", header=header, field_name="startDate")
-            assert _verified_rule(draft, SCHEMA) is None, header
+            assert _verified_rule(draft, SCHEMA)[0] is None, header
 
     def test_a_value_outside_the_vocabulary_is_refused(self) -> None:
         draft = _draft(
@@ -121,10 +121,10 @@ class TestVerifier:
             value="Seasonal Temp",
             canonical="seasonal",  # not a member
         )
-        assert _verified_rule(draft, SCHEMA) is None
+        assert _verified_rule(draft, SCHEMA)[0] is None
 
     def test_a_value_inside_the_vocabulary_is_accepted(self) -> None:
-        rule = _verified_rule(
+        rule, _ = _verified_rule(
             _draft(
                 kind="value_alias",
                 field_name="employmentType",
@@ -138,7 +138,7 @@ class TestVerifier:
 
     def test_a_value_rule_on_a_non_enum_field_is_refused(self) -> None:
         draft = _draft(kind="value_alias", field_name="fullName", value="priya", canonical="Priya")
-        assert _verified_rule(draft, SCHEMA) is None
+        assert _verified_rule(draft, SCHEMA)[0] is None
 
     def test_an_override_cannot_be_inferred(self) -> None:
         """Disabling a shipped rule is a person's disagreement, never an inference.
@@ -148,18 +148,18 @@ class TestVerifier:
         it names it.
         """
         assert "targets_rule_id" not in ProposedRuleDraft.model_fields
-        assert _verified_rule(_draft(kind="override"), SCHEMA) is None
+        assert _verified_rule(_draft(kind="override"), SCHEMA)[0] is None
 
     def test_an_unknown_kind_is_refused(self) -> None:
-        assert _verified_rule(_draft(kind="rewrite_everything"), SCHEMA) is None
+        assert _verified_rule(_draft(kind="rewrite_everything"), SCHEMA)[0] is None
 
     @pytest.mark.parametrize("order", ["", "dd/mm", "whatever"])
     def test_a_date_rule_needs_a_real_reading(self, order: str) -> None:
         draft = _draft(kind="date_order", header="doj", date_order=order)
-        assert _verified_rule(draft, SCHEMA) is None
+        assert _verified_rule(draft, SCHEMA)[0] is None
 
     def test_a_date_rule_with_a_real_reading_is_accepted(self) -> None:
-        rule = _verified_rule(
+        rule, _ = _verified_rule(
             _draft(kind="date_order", header="doj", date_order="day_first"), SCHEMA
         )
         assert rule is not None
@@ -167,8 +167,68 @@ class TestVerifier:
 
     def test_an_incomplete_draft_is_refused(self) -> None:
         """The rule model's own shape validators are the last gate."""
-        assert _verified_rule(_draft(kind="header_alias", header="Ref"), SCHEMA) is None
-        assert _verified_rule(_draft(kind="column_ignore"), SCHEMA) is None
+        assert _verified_rule(_draft(kind="header_alias", header="Ref"), SCHEMA)[0] is None
+        assert _verified_rule(_draft(kind="column_ignore"), SCHEMA)[0] is None
+
+
+class TestRefusalsAreExplained:
+    """A refused draft must say why, because a spent request has to be accounted for.
+
+    The trail previously showed the model being asked about a rule and then showed
+    nothing at all — no rule, no reason — and the only honest reading of that was
+    that something had broken. The reviewer does not have to adjudicate the model's
+    mistake, but they are entitled to know a request produced nothing and why.
+    """
+
+    def test_every_refusal_carries_a_reason(self) -> None:
+        refusals = [
+            _draft(generalises=False),
+            _draft(kind="rewrite_everything"),
+            _draft(kind="header_alias", header="Date", field_name="startDate"),
+            _draft(kind="header_alias", header="Ref", field_name="notAField"),
+            _draft(kind="header_alias", header="Ref"),
+            _draft(kind="date_order", header="doj", date_order="sideways"),
+            _draft(
+                kind="value_alias",
+                field_name="employmentType",
+                value="x",
+                canonical="seasonal",
+            ),
+        ]
+        for draft in refusals:
+            rule, reason = _verified_rule(draft, SCHEMA)
+            assert rule is None, draft
+            assert reason, f"refused with no reason: {draft}"
+
+    def test_an_accepted_draft_carries_no_reason(self) -> None:
+        rule, reason = _verified_rule(
+            _draft(kind="header_alias", header="Cost Centre Ref", field_name="department"),
+            SCHEMA,
+        )
+        assert rule is not None
+        assert reason is None
+
+
+class TestAmbiguousHeadersCostNothing:
+    """A decision no rule could capture must not reach the model at all.
+
+    Resolving a header two fields claim is the case: the verifier would refuse any
+    draft from it, so asking spends a request that cannot produce anything. On a real
+    run this showed as a request made and no rule to show for it.
+    """
+
+    def test_an_ambiguous_header_decision_is_filtered_before_the_model(self) -> None:
+        issue = _issue(IssueType.AMBIGUOUS_MAPPING, column_id="f0:c3")
+        assert not is_generalisable(issue, "approve", schema=SCHEMA, column_header="Date")
+
+    def test_an_unambiguous_header_decision_still_reaches_the_model(self) -> None:
+        issue = _issue(IssueType.AMBIGUOUS_MAPPING, column_id="f0:c5")
+        assert is_generalisable(issue, "approve", schema=SCHEMA, column_header="Cost Centre Ref")
+
+    def test_without_a_header_the_filter_does_not_guess(self) -> None:
+        """A decision with no column is judged on its type alone, as before."""
+        issue = _issue(IssueType.AMBIGUOUS_MAPPING)
+        assert is_generalisable(issue, "approve", schema=SCHEMA, column_header="")
 
 
 class TestDraftShape:

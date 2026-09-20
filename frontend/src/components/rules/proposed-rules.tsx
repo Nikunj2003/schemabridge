@@ -18,8 +18,18 @@ import { KIND_LABEL, describeRule } from "@/lib/rules";
  * at all when there is nothing to offer, since an empty "no suggestions" panel
  * teaches people to stop reading this area.
  */
-export function ProposedRules({ runId, schemaName }: { runId: string; schemaName: string }) {
+export function ProposedRules({
+  runId,
+  schemaName,
+  asked,
+}: {
+  runId: string;
+  schemaName: string;
+  /** Whether the reviewer decided anything, so a silent card is not the answer. */
+  asked: boolean;
+}) {
   const [proposals, setProposals] = useState<ProposedRule[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [accepted, setAccepted] = useState<Set<string>>(new Set());
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<string | null>(null);
@@ -28,9 +38,10 @@ export function ProposedRules({ runId, schemaName }: { runId: string; schemaName
   useEffect(() => {
     let live = true;
     void (async () => {
-      const loaded = await api.rules.proposed(runId).catch(() => null);
-      if (!live || !loaded) return;
-      setProposals(loaded.proposals);
+      const result = await api.rules.proposed(runId).catch(() => null);
+      if (!live) return;
+      if (result) setProposals(result.proposals);
+      setLoaded(true);
     })();
     return () => {
       live = false;
@@ -51,7 +62,23 @@ export function ProposedRules({ runId, schemaName }: { runId: string; schemaName
   };
 
   const open = proposals.filter((proposal) => !dismissed.has(proposal.proposal_id));
-  if (open.length === 0) return null;
+
+  // A decision was made and no rule came of it. Saying so is the point: the audit
+  // shows the model being asked, and a card that simply vanished left the reader to
+  // conclude something had broken. Silence is only correct when nothing was asked.
+  if (open.length === 0) {
+    if (!asked || !loaded) return null;
+    return (
+      <section className="panel mt-5 px-5 py-4">
+        <h2 className="text-[14px] font-medium">Nothing worth remembering</h2>
+        <p className="mt-1 max-w-[64ch] text-[12.5px] text-ink-muted">
+          Your decisions here were about this file rather than a pattern that would
+          recur, so no rule was drafted. The audit below says which, and why, for each
+          one. Nothing was saved.
+        </p>
+      </section>
+    );
+  }
 
   const savedCount = open.filter((p) => accepted.has(p.proposal_id)).length;
 

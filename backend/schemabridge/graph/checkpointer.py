@@ -38,6 +38,11 @@ _ALLOWED_TYPES: tuple[type, ...] = (
     models.DeliveryOutcome,
     models.DeliveryState,
     models.Disposition,
+    # Reaches a channel as a bare enum on an event's own field, so it needs
+    # listing in its own right. Without it every restored event's provenance
+    # degraded to a plain string and the audit could no longer say what did the
+    # work — a silent loss, since a string compares equal to the value it lost.
+    models.EventExecutionBasis,
     models.IssueOption,
     models.IssueResolution,
     models.IssueStatus,

@@ -122,7 +122,13 @@ export function RunView({ runId }: { runId: string }) {
         )}
       </div>
 
-      {finished && <ProposedRules runId={runId} schemaName={run.schema_name} />}
+      {finished && (
+        <ProposedRules
+          runId={runId}
+          schemaName={run.schema_name}
+          asked={answered.length > 0}
+        />
+      )}
 
       <section className="panel mt-5 overflow-hidden">
         <div className="flex items-center gap-2 border-b border-line px-5 py-3 text-[13.5px] font-medium">

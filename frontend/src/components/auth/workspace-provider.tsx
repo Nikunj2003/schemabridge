@@ -1,9 +1,9 @@
 "use client";
 
 import { type AppState, Auth0Provider, useAuth0 } from "@auth0/auth0-react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { configureAccessTokenProvider } from "@/lib/api";
+import { configureAccessTokenProvider, resetWorkspace } from "@/lib/api";
 
 /**
  * Which workspace the browser is acting as.
@@ -55,15 +55,33 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       // what makes this an acceptable trade for a token in browser storage.
       cacheLocation="localstorage"
       onRedirectCallback={(state?: AppState) => {
-        // A real navigation, not `history.replaceState`. Rewriting the address
-        // bar alone left the router on the previous route, so signing in showed
-        // the sign-in page under an /app URL.
-        window.location.replace(returnTarget(state?.returnTo));
+        // A client-side navigation, not a full page load: `location.replace`
+        // reloaded the whole app, which is why the landing page flashed for a
+        // second before /app appeared. `history.replaceState` is not enough
+        // either — it moves the address bar without telling the router.
+        redirectTo(returnTarget(state?.returnTo));
       }}
     >
       <ConfiguredWorkspaceProvider>{children}</ConfiguredWorkspaceProvider>
     </Auth0Provider>
   );
+}
+
+/**
+ * How to navigate after the callback, installed by the subtree that has the
+ * router. A module-level handle rather than a hook, because `onRedirectCallback`
+ * is a prop of the provider itself and so sits outside any component that could
+ * call `useRouter`.
+ */
+let navigate: ((path: string) => void) | null = null;
+
+function redirectTo(path: string) {
+  if (navigate) {
+    navigate(path);
+    return;
+  }
+  // Before the router is available, a hard navigation is still correct.
+  window.location.replace(path);
 }
 
 /** Where to land after Google returns.
@@ -109,6 +127,15 @@ function GuestWorkspaceProvider({ children }: { children: React.ReactNode }) {
 
 function ConfiguredWorkspaceProvider({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
+
+  useEffect(() => {
+    navigate = (path: string) => router.replace(path);
+    return () => {
+      navigate = null;
+    };
+  }, [router]);
+
   const { isAuthenticated, isLoading, user, loginWithRedirect, logout, getAccessTokenSilently } =
     useAuth0();
   /**
@@ -121,15 +148,31 @@ function ConfiguredWorkspaceProvider({ children }: { children: React.ReactNode }
   const [preferGuest, setPreferGuest] = useState(false);
   const mode: WorkspaceMode = isAuthenticated && !preferGuest ? "authenticated" : "anonymous";
 
+  /**
+   * Whether Auth0 is mid-handoff, which the `code` and `state` query parameters
+   * mark. Google returns to the registered callback — the site root — so without
+   * hiding it the landing page renders for the moment before the redirect lands.
+   */
+  const returningFromLogin =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).has("code") &&
+    new URLSearchParams(window.location.search).has("state");
+
   useEffect(() => {
+    // Nothing may be fetched until Auth0 has finished restoring the session.
+    // Declaring "no token" too early would send the first request to the shared
+    // guest workspace and show its runs under a private account.
+    if (isLoading) {
+      resetWorkspace();
+      return;
+    }
     // The API client attaches a bearer token only in personal mode; guest
     // requests deliberately carry none, which is what selects the shared
     // workspace server-side.
     configureAccessTokenProvider(
       mode === "authenticated" ? async () => getAccessTokenSilently() : null,
     );
-    return () => configureAccessTokenProvider(null);
-  }, [getAccessTokenSilently, mode]);
+  }, [getAccessTokenSilently, isLoading, mode]);
 
   const value = useMemo<WorkspaceContextValue>(
     () => ({
@@ -158,7 +201,20 @@ function ConfiguredWorkspaceProvider({ children }: { children: React.ReactNode }
     }),
     [isLoading, loginWithRedirect, logout, mode, pathname, user],
   );
-  return <WorkspaceContext.Provider value={value}>{children}</WorkspaceContext.Provider>;
+  return (
+    <WorkspaceContext.Provider value={value}>
+      {returningFromLogin || isLoading ? <SigningIn /> : children}
+    </WorkspaceContext.Provider>
+  );
+}
+
+/** Shown only while the sign-in handoff completes, in place of any real page. */
+function SigningIn() {
+  return (
+    <div className="flex min-h-dvh items-center justify-center bg-canvas" role="status">
+      <p className="text-[14px] text-ink-muted">Signing you in…</p>
+    </div>
+  );
 }
 
 export function useWorkspace(): WorkspaceContextValue {

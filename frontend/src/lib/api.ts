@@ -390,12 +390,42 @@ type AccessTokenProvider = () => Promise<string | null>;
 
 let accessTokenProvider: AccessTokenProvider | null = null;
 
-/** Installed by the workspace provider; never accepts identity from callers. */
+/**
+ * Resolves once the workspace is known, so no request is sent before then.
+ *
+ * Absence of a token is meaningful — it selects the shared guest workspace — so
+ * "not decided yet" and "deliberately a guest" must not look the same. Without
+ * this gate, a component fetching on mount raced the session being restored and
+ * got the guest workspace's data while the account menu said private.
+ */
+let settled: Promise<void>;
+let markSettled: () => void;
+function resetWorkspaceGate() {
+  settled = new Promise<void>((resolve) => {
+    markSettled = resolve;
+  });
+}
+resetWorkspaceGate();
+
+/**
+ * Installed by the workspace provider; never accepts identity from callers.
+ *
+ * Calling it is also what declares the workspace settled, so requests held at
+ * the gate above are released.
+ */
 export function configureAccessTokenProvider(provider: AccessTokenProvider | null) {
   accessTokenProvider = provider;
+  markSettled();
+}
+
+/** Hold requests again, for a workspace change that must not serve stale data. */
+export function resetWorkspace() {
+  accessTokenProvider = null;
+  resetWorkspaceGate();
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  await settled;
   const token = accessTokenProvider ? await accessTokenProvider() : null;
   const headers = new Headers(init?.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);
@@ -411,6 +441,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function requestEmpty(path: string, init: RequestInit): Promise<void> {
+  await settled;
   const token = accessTokenProvider ? await accessTokenProvider() : null;
   const headers = new Headers(init.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);

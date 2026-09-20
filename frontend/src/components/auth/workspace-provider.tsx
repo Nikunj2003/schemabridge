@@ -155,25 +155,20 @@ function ConfiguredWorkspaceProvider({ children }: { children: React.ReactNode }
   const mode: WorkspaceMode = isAuthenticated && !preferGuest ? "authenticated" : "anonymous";
 
   /**
-   * Whether to hold the page back rather than render a route.
+   * Whether to hold a page back rather than render it.
    *
-   * `isLoading` covers the whole handoff: the SDK runs `handleRedirectCallback`
-   * and `onRedirectCallback` inside its initialisation, so it stays true from the
-   * moment Google returns until the redirect to /app has been issued. That is
-   * what stops the landing page painting at the callback URL, and it also means
-   * no page renders before its workspace is known.
+   * Scoped to the signed-in area deliberately. `isLoading` is briefly true on
+   * *every* page load, so gating the whole tree meant the public pages rendered
+   * a "Signing you in…" screen first and then themselves — which is the flash
+   * that looked like a redirect through the landing page. Nothing on a public
+   * page depends on knowing the workspace, so there is nothing to wait for.
    *
-   * Deliberately not derived from the `code` and `state` parameters. Reading
-   * `window.location` during render was the bug that stranded this on
-   * "Signing you in…" — React never re-evaluated it, so once the redirect
-   * stripped the parameters the gate stayed shut until a manual refresh — and
-   * `useSearchParams` cannot be used this high in the tree without forcing every
-   * page out of static prerendering.
-   *
-   * A failed handoff clears it too, because the SDK finishes loading and reports
-   * the failure through `error` rather than staying in flight.
+   * Inside /app there is: a page that rendered before the workspace was known
+   * would fetch against the wrong one. Holding it is also what keeps the callback
+   * landing quiet, since /app is where Google returns.
    */
-  const awaitingWorkspace = isLoading;
+  const inAppArea = pathname?.startsWith("/app") ?? false;
+  const awaitingWorkspace = isLoading && inAppArea;
 
   useEffect(() => {
     // Nothing may be fetched until Auth0 has finished restoring the session.

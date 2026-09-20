@@ -30,6 +30,7 @@ The files are also present under `backend/fixtures/samples/` for local work.
 | `employees-legacy.csv` | Messy values, ambiguous date handling, an unrepairable email, and destination failures. |
 | `employees-hr-export.csv` | Different header spellings, safe duplicate merge, genuine conflict, and competing-column ambiguity. |
 | `employees-directory.xlsx` | Typed Excel dates plus an unknown header that can use one model request. |
+| `employees-rule-learning.csv` | One unfamiliar identifier header that is designed to produce a model-assisted mapping and reusable header-rule proposal. |
 
 Sample outcomes assume the built-in schema and no previously approved rule that
 already changes the scenario. Upload order does not matter: files are read

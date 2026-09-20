@@ -132,6 +132,40 @@ CLEAN = to_csv(
     ]
 )
 
+# ---------------------------------------------------------------------------
+# File 4: known values, one unfamiliar but semantically clear identifier header.
+# The model can propose its mapping; once its verified proposal is accepted, the
+# run offers a header-alias rule for a later file with the same convention.
+# ---------------------------------------------------------------------------
+LEARNING = to_csv(
+    [
+        [
+            "Workforce Identifier",
+            "fullName",
+            "workEmail",
+            "startDate",
+            "department",
+            "employmentType",
+        ],
+        [
+            "WL-5001",
+            "Aditi Kapoor",
+            "aditi.kapoor@example.com",
+            "2026-01-12",
+            "People",
+            "full_time",
+        ],
+        [
+            "WL-5002",
+            "Yusuf Khan",
+            "yusuf.khan@example.com",
+            "2026-02-18",
+            "People",
+            "contract",
+        ],
+    ]
+)
+
 
 def build_workbook() -> bytes:
     """An Excel export with real typed dates and one header no alias table knows."""
@@ -196,12 +230,14 @@ FILES: dict[str, str] = {
     "employees-legacy.csv": LEGACY,
     "employees-hr-export.csv": HR_EXPORT,
     "employees-clean.csv": CLEAN,
+    "employees-rule-learning.csv": LEARNING,
 }
 
 DESCRIPTIONS = {
     "employees-legacy.csv": "messy values, ambiguous date, unrepairable email",
     "employees-hr-export.csv": "different headers, a merge, a conflict, an ambiguous column",
     "employees-clean.csv": "requires no human input",
+    "employees-rule-learning.csv": "model-assisted header mapping, then a reusable rule proposal",
     "employees-directory.xlsx": "typed Excel dates, one unknown header",
 }
 

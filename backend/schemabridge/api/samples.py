@@ -27,6 +27,7 @@ _AVAILABLE: dict[str, str] = {
     "employees-legacy.csv": "text/csv",
     "employees-hr-export.csv": "text/csv",
     "employees-clean.csv": "text/csv",
+    "employees-rule-learning.csv": "text/csv",
     "employees-directory.xlsx": (
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     ),

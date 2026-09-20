@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from schemabridge.agent.induce import propose_rule_from_model_mapping
 from schemabridge.domain import identity as identity_module
 from schemabridge.domain import mapping as mapping_module
 from schemabridge.domain import validate as validate_module
@@ -278,3 +279,31 @@ class TestExcelWorkbook:
 
         # No alias table knows this header. That is the model's job.
         assert column_id("Cost Centre Ref") in result.unresolved
+
+
+class TestLearningSample:
+    def test_offers_a_reusable_rule_after_a_verified_model_mapping(self) -> None:
+        learning = load_csv("employees-rule-learning.csv", "learning")
+        result = decide_mappings(learning.columns, learning.profiles)
+        identifier = next(
+            column for column in learning.columns if column.header == "Workforce Identifier"
+        )
+
+        # It needs model assistance the first time; every other header is known.
+        assert result.unresolved == (identifier.id,)
+
+        # Once that proposal is independently verified as Employee ID, the rule
+        # proposal is deterministic and free: the next run can avoid the model.
+        proposal = propose_rule_from_model_mapping(
+            identifier.header,
+            "employeeId",
+            ("Verified model suggestion.",),
+            schema=BUILTIN_SCHEMA,
+            run_id="learning-run",
+        )
+        assert proposal is not None
+        # Rules store their header key normalised, so spelling/case differences
+        # in the next export still match the approved convention.
+        assert proposal.rule.header == "workforceidentifier"
+        assert proposal.rule.field_name == "employeeId"
+        assert proposal.scope.value == "column"

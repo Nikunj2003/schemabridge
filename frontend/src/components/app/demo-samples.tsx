@@ -53,6 +53,15 @@ const SCENARIOS: Scenario[] = [
     asks: false,
   },
   {
+    title: "Learn a header once",
+    badge: "Offers a rule",
+    files: ["employees-rule-learning.csv"],
+    outcome: "Uses the model, then offers a reusable mapping rule",
+    detail:
+      "“Workforce Identifier” is not a shipped alias, so the model proposes Employee ID and the verifier checks it. When the run completes, approve the proposed header-alias rule. Uploading the file again then needs no model request.",
+    asks: false,
+  },
+  {
     title: "Everything at once",
     badge: "Asks you",
     files: ["employees-legacy.csv", "employees-hr-export.csv", "employees-directory.xlsx"],

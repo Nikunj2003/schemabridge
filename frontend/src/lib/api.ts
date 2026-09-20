@@ -115,6 +115,12 @@ export interface ActivityEvent {
   rule_origin: RuleOrigin | null;
 }
 
+/** One sample export the deployment can hand over. */
+export interface SampleFile {
+  name: string;
+  bytes: number;
+}
+
 export interface MigrationUsage {
   used: number;
   limit: number;
@@ -451,6 +457,17 @@ async function requestEmpty(path: string, init: RequestInit): Promise<void> {
 
 export const api = {
   schema: () => request<SchemaInfo>("/api/schema"),
+
+  /**
+   * The sample exports this deployment serves.
+   *
+   * Asked for rather than hardcoded, so the dialog never offers a download that
+   * would 404 if the fixtures were missing from a deployment.
+   */
+  samples: () => request<{ files: SampleFile[] }>("/api/samples"),
+
+  /** Where to download one sample export. */
+  sampleUrl: (name: string) => `/api/samples/${encodeURIComponent(name)}`,
 
   /** Shared infrastructure model budget, not a visitor's migration allowance. */
   usage: () => request<{ used: number; limit: number }>("/api/usage"),

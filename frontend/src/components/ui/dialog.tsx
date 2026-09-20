@@ -101,7 +101,9 @@ export function Dialog({
       >
         <div className="flex items-center justify-between gap-4 border-b border-line bg-sunken px-5 py-3 sm:px-6">
           <h2 id={titleId} className="text-[15px] font-semibold">{title}</h2>
-          <Button variant="quiet" size="sm" onClick={close} aria-label="Close review dialog">
+          {/* Named after the dialog it closes: "Close review dialog" was hardcoded
+              here and became wrong as soon as a second dialog reused this. */}
+          <Button variant="quiet" size="sm" onClick={close} aria-label={`Close ${title.toLowerCase()}`}>
             Close
           </Button>
         </div>

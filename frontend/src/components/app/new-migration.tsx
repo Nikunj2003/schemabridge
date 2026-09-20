@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { ContentFrame } from "@/components/app/content-frame";
+import { DemoSamples } from "@/components/app/demo-samples";
 import { useMigrationUsage } from "@/components/app/migration-usage";
 import { Button } from "@/components/ui/button";
 import { Select, Textarea } from "@/components/ui/field";
@@ -135,7 +136,12 @@ export function NewMigration() {
       </p>
 
       <section className="mt-6">
-        <h2 className="text-[15px] font-semibold">1. Your files</h2>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-[15px] font-semibold">1. Your files</h2>
+          {/* Beside the upload step rather than at the top of the page: it is
+              only useful to someone who has nothing to drop in yet. */}
+          <DemoSamples />
+        </div>
         <p className="mt-0.5 text-[13px] text-ink-muted">
           CSV or Excel, up to {MAX_FILES} files. Use synthetic data only.
         </p>

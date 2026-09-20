@@ -19,6 +19,7 @@ from schemabridge.api.mock_target import router as mock_target_router
 from schemabridge.api.observability import router as observability_router
 from schemabridge.api.rule_routes import router as rules_router
 from schemabridge.api.runs import router as runs_router
+from schemabridge.api.samples import router as samples_router
 from schemabridge.api.schema_routes import router as schemas_router
 from schemabridge.server.config import get_settings
 
@@ -82,6 +83,7 @@ app.include_router(schemas_router)
 app.include_router(rules_router)
 app.include_router(mock_target_router)
 app.include_router(observability_router)
+app.include_router(samples_router)
 
 
 @app.get("/api/health")

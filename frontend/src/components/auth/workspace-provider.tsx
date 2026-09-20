@@ -46,7 +46,11 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       authorizationParams={{
         audience,
         scope: "openid profile email migrations:read migrations:write",
-        redirect_uri: typeof window === "undefined" ? undefined : window.location.origin,
+        // The app itself, not the site root. Returning to "/" mounted the
+        // landing page and only then navigated to /app, which is what made the
+        // landing page flash. This URL is registered in Auth0's callback list.
+        redirect_uri:
+          typeof window === "undefined" ? undefined : `${window.location.origin}/app`,
       }}
       useRefreshTokens
       // Persisted, so a reload or a returning visit does not silently drop the
@@ -55,11 +59,13 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       // what makes this an acceptable trade for a token in browser storage.
       cacheLocation="localstorage"
       onRedirectCallback={(state?: AppState) => {
-        // A client-side navigation, not a full page load: `location.replace`
-        // reloaded the whole app, which is why the landing page flashed for a
-        // second before /app appeared. `history.replaceState` is not enough
-        // either — it moves the address bar without telling the router.
-        redirectTo(returnTarget(state?.returnTo));
+        // The browser is already on /app, so there is usually nothing to do.
+        // Only a deep link needs a move, and it is a client-side one:
+        // `location.replace` would reload the whole app, and
+        // `history.replaceState` moves the address bar without telling the
+        // router — both were previously visible as a flash.
+        const target = returnTarget(state?.returnTo);
+        if (target !== "/app") redirectTo(target);
       }}
     >
       <ConfiguredWorkspaceProvider>{children}</ConfiguredWorkspaceProvider>

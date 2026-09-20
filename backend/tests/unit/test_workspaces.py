@@ -295,13 +295,18 @@ class TestCheckpointExpiry:
             def list_indexes(self) -> list[dict[str, Any]]:
                 return []
 
-        original = checkpointer.FixedExpiryMongoDBSaver
+        original_saver = checkpointer.FixedExpiryMongoDBSaver
+        original_client = checkpointer.get_client
         checkpointer.FixedExpiryMongoDBSaver = _Fake  # type: ignore[misc]
+        # Stubbed too: `build_checkpointer` resolves a client for its argument, and
+        # this suite runs without database credentials.
+        checkpointer.get_client = lambda: None  # type: ignore[assignment]
         try:
             checkpointer.build_checkpointer("anonymous")
             checkpointer.build_checkpointer("authenticated")
         finally:
-            checkpointer.FixedExpiryMongoDBSaver = original  # type: ignore[misc]
+            checkpointer.FixedExpiryMongoDBSaver = original_saver  # type: ignore[misc]
+            checkpointer.get_client = original_client  # type: ignore[assignment]
 
         assert names[0] != names[1]
         assert names[0].endswith("_anonymous")

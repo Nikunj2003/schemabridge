@@ -136,7 +136,7 @@ function ConfiguredWorkspaceProvider({ children }: { children: React.ReactNode }
     };
   }, [router]);
 
-  const { isAuthenticated, isLoading, user, loginWithRedirect, logout, getAccessTokenSilently } =
+  const { error, isAuthenticated, isLoading, user, loginWithRedirect, logout, getAccessTokenSilently } =
     useAuth0();
   /**
    * Set when a signed-in person deliberately chooses the shared workspace.
@@ -149,14 +149,25 @@ function ConfiguredWorkspaceProvider({ children }: { children: React.ReactNode }
   const mode: WorkspaceMode = isAuthenticated && !preferGuest ? "authenticated" : "anonymous";
 
   /**
-   * Whether Auth0 is mid-handoff, which the `code` and `state` query parameters
-   * mark. Google returns to the registered callback — the site root — so without
-   * hiding it the landing page renders for the moment before the redirect lands.
+   * Whether to hold the page back rather than render a route.
+   *
+   * `isLoading` covers the whole handoff: the SDK runs `handleRedirectCallback`
+   * and `onRedirectCallback` inside its initialisation, so it stays true from the
+   * moment Google returns until the redirect to /app has been issued. That is
+   * what stops the landing page painting at the callback URL, and it also means
+   * no page renders before its workspace is known.
+   *
+   * Deliberately not derived from the `code` and `state` parameters. Reading
+   * `window.location` during render was the bug that stranded this on
+   * "Signing you in…" — React never re-evaluated it, so once the redirect
+   * stripped the parameters the gate stayed shut until a manual refresh — and
+   * `useSearchParams` cannot be used this high in the tree without forcing every
+   * page out of static prerendering.
+   *
+   * A failed handoff clears it too, because the SDK finishes loading and reports
+   * the failure through `error` rather than staying in flight.
    */
-  const returningFromLogin =
-    typeof window !== "undefined" &&
-    new URLSearchParams(window.location.search).has("code") &&
-    new URLSearchParams(window.location.search).has("state");
+  const awaitingWorkspace = isLoading;
 
   useEffect(() => {
     // Nothing may be fetched until Auth0 has finished restoring the session.
@@ -203,13 +214,29 @@ function ConfiguredWorkspaceProvider({ children }: { children: React.ReactNode }
   );
   return (
     <WorkspaceContext.Provider value={value}>
-      {returningFromLogin || isLoading ? <SigningIn /> : children}
+      {awaitingWorkspace ? <SigningIn error={error} /> : children}
     </WorkspaceContext.Provider>
   );
 }
 
 /** Shown only while the sign-in handoff completes, in place of any real page. */
-function SigningIn() {
+function SigningIn({ error }: { error?: Error }) {
+  if (error) {
+    return (
+      <div className="flex min-h-dvh items-center justify-center px-6 bg-canvas" role="alert">
+        <div className="max-w-[26rem] text-center">
+          <p className="text-[14.5px] font-medium">Sign-in did not complete</p>
+          <p className="mt-1.5 text-[13.5px] text-ink-muted">{error.message}</p>
+          <a
+            href="/signin"
+            className="mt-4 inline-block text-[13.5px] font-medium text-accent underline-offset-4 hover:underline"
+          >
+            Try again
+          </a>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="flex min-h-dvh items-center justify-center bg-canvas" role="status">
       <p className="text-[14px] text-ink-muted">Signing you in…</p>

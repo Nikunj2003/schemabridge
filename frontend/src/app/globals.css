@@ -201,8 +201,11 @@
 
   .marketing-hero > .marketing-frame {
     min-block-size: inherit;
-    align-content: start;
-    padding-block: clamp(3.75rem, 8vh, 6rem);
+    /* Centred, not top-aligned. The hero is a full viewport tall, so anchoring
+       content to the top left a large empty band below it and made the page read
+       as unfinished rather than spacious. */
+    align-content: center;
+    padding-block: clamp(3rem, 7vh, 5rem);
   }
 
   .marketing-section {
@@ -225,10 +228,11 @@
   }
 
   .marketing-hero-title {
-    font-size: clamp(2.45rem, 5.5vw, 4.45rem);
+    font-size: clamp(2.45rem, 5.2vw, 4.1rem);
     font-weight: 600;
-    letter-spacing: -0.045em;
-    line-height: 0.99;
+    letter-spacing: -0.04em;
+    /* A touch more than 0.99: the two-line headline was nearly touching. */
+    line-height: 1.04;
   }
 
   .marketing-section-title {
@@ -320,7 +324,6 @@
   @media (min-width: 64rem) {
     .marketing-frame { padding-inline: 2rem; }
     .marketing-section { padding-block: 8rem; }
-    .marketing-hero > .marketing-frame { align-content: center; }
   }
 
   .stage-connector-active {

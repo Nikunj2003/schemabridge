@@ -197,6 +197,7 @@ function AccountMenu({
   const id = useId();
   const { mode, displayName, signOut, switchToSharedWorkspace } = useWorkspace();
   const initial = displayName.slice(0, 1).toUpperCase();
+  const close = () => setOpen(false);
   return (
     <div className="relative">
       <button
@@ -231,19 +232,22 @@ function AccountMenu({
               </p>
             </div>
             <div className="my-1 h-px bg-line" />
-            <Link href="/app/usage" className="block rounded px-2.5 py-1.5 text-[13.5px] hover:bg-sunken">
+            {/* Each item closes the menu itself. It is an overlay outside the
+                routed tree, so a navigation does not unmount it — without this the
+                next page rendered underneath a menu that stayed open. */}
+            <Link href="/app/usage" onClick={close} className="block rounded px-2.5 py-1.5 text-[13.5px] hover:bg-sunken">
               Usage &amp; data
             </Link>
-            <Link href="/app/schema" className="block rounded px-2.5 py-1.5 text-[13.5px] hover:bg-sunken">
+            <Link href="/app/schema" onClick={close} className="block rounded px-2.5 py-1.5 text-[13.5px] hover:bg-sunken">
               My schema
             </Link>
-            <Link href="/app/rules" className="block rounded px-2.5 py-1.5 text-[13.5px] hover:bg-sunken">
+            <Link href="/app/rules" onClick={close} className="block rounded px-2.5 py-1.5 text-[13.5px] hover:bg-sunken">
               Rules
             </Link>
             <div className="my-1 h-px bg-line" />
             {mode === "authenticated" ? (
               <>
-                <button onClick={switchToSharedWorkspace} className="block w-full rounded px-2.5 py-1.5 text-left text-[13.5px] hover:bg-sunken">
+                <button onClick={() => { close(); switchToSharedWorkspace(); }} className="block w-full rounded px-2.5 py-1.5 text-left text-[13.5px] hover:bg-sunken">
                   Use shared workspace
                 </button>
                 <button onClick={signOut} className="block w-full rounded px-2.5 py-1.5 text-left text-[13.5px] hover:bg-sunken">
@@ -251,13 +255,17 @@ function AccountMenu({
                 </button>
               </>
             ) : (
-              <Link href="/signin" className="block rounded px-2.5 py-1.5 text-[13.5px] hover:bg-sunken">
-                Sign in with Google
-              </Link>
+              <>
+                <Link href="/signin" onClick={close} className="block rounded px-2.5 py-1.5 text-[13.5px] hover:bg-sunken">
+                  Sign in with Google
+                </Link>
+                {/* Only for a guest. Signing out is a signed-in person's way back
+                    to the public site, so offering both is two doors to one room. */}
+                <Link href="/" onClick={close} className="block rounded px-2.5 py-1.5 text-[13.5px] hover:bg-sunken">
+                  Back to home
+                </Link>
+              </>
             )}
-            <Link href="/" className="block rounded px-2.5 py-1.5 text-[13.5px] hover:bg-sunken">
-              Back to home
-            </Link>
           </div>
         </>
       )}

@@ -38,10 +38,19 @@ export function HexGridBackground() {
       };
     };
 
+    /**
+     * One flat-top hexagon.
+     *
+     * The 30° offset is what makes it flat-top, and it has to match the spacing
+     * below: `horizontal = √3·r` and `vertical = 1.5·r` are the flat-top
+     * tessellation offsets. Without the offset this drew pointy-top hexagons on
+     * flat-top spacing, so they overlapped instead of interlocking and the
+     * lattice read as a field of stars rather than a honeycomb.
+     */
     const hex = (target: CanvasRenderingContext2D, x: number, y: number, radius: number) => {
       target.beginPath();
       for (let corner = 0; corner < 6; corner += 1) {
-        const angle = Math.PI / 3 * corner;
+        const angle = Math.PI / 3 * corner + Math.PI / 6;
         const px = x + Math.cos(angle) * radius;
         const py = y + Math.sin(angle) * radius;
         if (corner === 0) target.moveTo(px, py);
@@ -51,7 +60,9 @@ export function HexGridBackground() {
     };
 
     const metrics = () => {
-      const radius = Math.max(20, Math.min(28, size.width / 28));
+      // Larger cells than before: a dense lattice competes with the headline
+      // instead of sitting behind it.
+      const radius = Math.max(30, Math.min(44, size.width / 22));
       return { radius, horizontal: Math.sqrt(3) * radius, vertical: 1.5 * radius };
     };
 
@@ -72,7 +83,8 @@ export function HexGridBackground() {
       const { radius, horizontal, vertical } = metrics();
       const { line } = colors();
       cacheContext.strokeStyle = line;
-      cacheContext.globalAlpha = 0.1;
+      // Quieter, so the grid is felt rather than read.
+      cacheContext.globalAlpha = 0.055;
       cacheContext.lineWidth = 1;
       for (let row = -2; row < size.height / vertical + 3; row += 1) {
         for (let column = -2; column < size.width / horizontal + 3; column += 1) {

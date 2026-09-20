@@ -26,7 +26,14 @@ from schemabridge.domain.models import (
     SourceFile,
     SourceRow,
 )
-from schemabridge.domain.rules import EMPTY_RULES, ProposedRule, Rule, RuleSet
+from schemabridge.domain.rules import (
+    ProposedRule,
+    Rule,
+    RuleOrigin,
+    RuleSet,
+    builtin_rules,
+    layered,
+)
 from schemabridge.domain.schema import TargetSchema
 
 logger = logging.getLogger(__name__)
@@ -204,9 +211,12 @@ def run_rules(state: MigrationState) -> RuleSet:
     round-tripped as plain dicts, for the same reason `run_schema` does — an
     upgrade must not strand an in-flight migration.
     """
+    schema = run_schema(state)
     stored: Any = state.get("rules")
     if not stored:
-        return EMPTY_RULES
+        # No stored rules still means the shipped layer applies — it is derived
+        # from the schema, not stored alongside it.
+        return layered(builtin_rules(schema), (), schema_id=schema.schema_id)
     revived: list[Rule] = []
     for entry in stored:
         if isinstance(entry, Rule):
@@ -220,4 +230,8 @@ def run_rules(state: MigrationState) -> RuleSet:
                 # it is worth a line: a rule silently dropped looks to the reviewer
                 # like a rule that did not fire.
                 logger.warning("skipping unreadable rule: %s", type(error).__name__)
-    return RuleSet(tuple(revived), schema_id=run_schema(state).schema_id)
+    # A checkpoint written before this change carries the shipped layer too, so
+    # drop any duplicate: precedence is shipped-then-owned either way, and the
+    # composed set must not list one rule twice.
+    owned = tuple(rule for rule in revived if rule.origin is not RuleOrigin.BUILTIN)
+    return layered(builtin_rules(schema), owned, schema_id=schema.schema_id)

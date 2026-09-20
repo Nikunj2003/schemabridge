@@ -178,18 +178,23 @@ def read_migration_usage(request: Request) -> dict[str, str | int]:
 
 
 def _run_rules(session_id: str, schema: TargetSchema) -> tuple[Rule, ...]:
-    """The rules this run should carry, or none if the store is unreachable.
+    """The caller's own rules, to be snapshotted onto the run.
+
+    Deliberately *not* the layered set. The shipped layer is derived from the run's
+    own schema, which the checkpoint already carries, so storing it too duplicated
+    ~190 rules into every checkpoint at every step — it was 74% of all checkpoint
+    storage and on its own filled most of a free cluster. `run_rules` recomposes
+    the layers on read, so the engine still sees exactly the same rule set.
 
     A rule store outage degrades the run to the shipped engine rather than refusing
     to start: the migration still works, it just knows less, and the trail shows no
     learned marks so nobody is misled about why.
     """
     try:
-        resolved = rule_store.resolve_rules(session_id, schema)
+        return rule_store.owned_rules(session_id)
     except Exception as error:
         logger.warning("rule store unavailable: %s", type(error).__name__)
         return ()
-    return resolved.rules
 
 
 @router.post("/runs", status_code=status.HTTP_201_CREATED)

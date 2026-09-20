@@ -264,6 +264,16 @@ def record_hits(hits: dict[str, int]) -> None:
         logger.warning("could not record rule hits: %s", type(error).__name__)
 
 
+def owned_rules(owner_id: str) -> tuple[Rule, ...]:
+    """Just this workspace's own rules, without the derived shipped layer.
+
+    What a run snapshots. The shipped layer is a pure function of the schema, so
+    carrying it in the checkpoint as well is duplication that grows with every
+    step of every run.
+    """
+    return tuple(record.rule for record in list_rules(owner_id))
+
+
 def resolve_rules(owner_id: str, schema: TargetSchema) -> RuleSet:
     """The rules in force for one run: shipped, then the caller's own.
 

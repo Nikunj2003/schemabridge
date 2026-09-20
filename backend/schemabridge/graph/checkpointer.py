@@ -27,6 +27,12 @@ logger = logging.getLogger(__name__)
 
 _CHECKPOINT_DB_SUFFIX = "_checkpoints"
 
+#: Checkpoints kept per run. Resuming reads the newest; a correction cycle walks
+#: back only as far as the pending interrupt. Enough headroom for that, while
+#: bounding a long review's storage — the alternative kept every step for the
+#: whole retention window.
+HISTORY_LIMIT = 12
+
 #: Every domain type that can appear inside checkpointed state.
 #:
 #: The serializer matches an exact (module, name) pair — there is no wildcard —
@@ -132,7 +138,37 @@ class FixedExpiryMongoDBSaver(MongoDBSaver):
             self.checkpoint_collection.update_one(
                 dict(result["configurable"]), {"$set": {"expires_at": expires_at}}
             )
+        self._trim_history(str(result["configurable"]["thread_id"]))
         return result
+
+    def _trim_history(self, thread_id: str) -> None:
+        """Keep a bounded window of a run's checkpoint history.
+
+        Resuming, and the interrupt/correction cycle, only ever read back from the
+        newest checkpoints — but every superseded step was kept for the full
+        retention period, and they were 81% of all stored checkpoints. A run that
+        is corrected repeatedly grew without bound.
+
+        Best effort: failing to trim must never fail the write that just
+        succeeded, so a run is never lost to housekeeping.
+        """
+        try:
+            keep = [
+                document["checkpoint_id"]
+                for document in self.checkpoint_collection.find(
+                    {"thread_id": thread_id},
+                    {"checkpoint_id": 1},
+                    sort=[("checkpoint_id", -1)],
+                    limit=HISTORY_LIMIT,
+                )
+            ]
+            if len(keep) < HISTORY_LIMIT:
+                return
+            stale = {"thread_id": thread_id, "checkpoint_id": {"$nin": keep}}
+            self.checkpoint_collection.delete_many(stale)
+            self.writes_collection.delete_many(stale)
+        except Exception as error:
+            logger.warning("could not trim checkpoint history: %s", type(error).__name__)
 
     def put_writes(
         self,

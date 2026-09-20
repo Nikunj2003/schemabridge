@@ -60,6 +60,7 @@ _RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 #: deliberately unlike `request_origin`, which is never taken from a header
 #: because a forged one would turn delivery into request forgery.
 SCHEMA_HEADER = "X-Target-Schema"
+RUN_EXPIRY_HEADER = "X-Run-Expires-At"
 
 
 def _encode_schema(schema: TargetSchema) -> str:
@@ -196,6 +197,7 @@ def deliver_record(
     schema: TargetSchema,
     request_origin: str | None = None,
     attempt_number: int = 1,
+    run_expires_at: datetime | None = None,
     demo_headers: dict[str, str] | None = None,
 ) -> DeliveryResult:
     """Send one record, classifying the outcome honestly."""
@@ -210,6 +212,7 @@ def deliver_record(
         # The contract itself, compactly: a run's schema may never have been
         # saved, so there would be nothing for the destination to look up.
         SCHEMA_HEADER: _encode_schema(schema),
+        **({RUN_EXPIRY_HEADER: run_expires_at.isoformat()} if run_expires_at else {}),
     }
     if demo_headers:
         headers.update(demo_headers)

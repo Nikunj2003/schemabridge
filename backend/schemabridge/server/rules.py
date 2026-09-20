@@ -7,9 +7,9 @@ remove.
 
 Three properties carried over from `server.schemas`, for the same reasons:
 
-* **Ownership is by session, checked on every read and write.** A rule id appears
-  in URLs, so it is not a credential, and an absent rule and someone else's rule
-  are reported identically so a guessed id is never confirmed.
+* **Ownership is by workspace, checked on every read and write.** A rule id
+  appears in URLs, so it is not a credential, and an absent rule and one from
+  another workspace are reported identically so a guessed id is never confirmed.
 * **Writes are version-guarded**, with the version inside the update filter rather
   than checked beforehand. Two tabs editing one rule would otherwise silently lose
   whichever save landed first.
@@ -69,7 +69,7 @@ class RuleRecord:
     """A stored rule, with who owns it and when it last changed."""
 
     rule_id: str
-    owner_session_id: str
+    owner_id: str
     rule: Rule
     version: int
     created_at: datetime
@@ -90,7 +90,7 @@ def _record(document: dict[str, Any]) -> RuleRecord:
     stored["hits"] = int(document.get("hits", 0))
     return RuleRecord(
         rule_id=rule_id,
-        owner_session_id=str(document["owner_session_id"]),
+        owner_id=str(document["owner_id"]),
         rule=Rule.model_validate(stored),
         version=int(document.get("version", 1)),
         created_at=document["created_at"],
@@ -105,9 +105,9 @@ def _stored(rule: Rule) -> dict[str, Any]:
     return payload
 
 
-def create_rule(owner_session_id: str, rule: Rule) -> RuleRecord:
+def create_rule(owner_id: str, rule: Rule) -> RuleRecord:
     """Store a new rule, assigning it an id of our own choosing."""
-    if count_for_session(owner_session_id) >= MAX_RULES_PER_SESSION:
+    if count_for_session(owner_id) >= MAX_RULES_PER_SESSION:
         raise RuleLimitError(
             f"You can keep up to {MAX_RULES_PER_SESSION} rules. "
             f"Delete one you no longer need to add another."
@@ -117,7 +117,7 @@ def create_rule(owner_session_id: str, rule: Rule) -> RuleRecord:
     _rules().insert_one(
         {
             "_id": rule_id,
-            "owner_session_id": owner_session_id,
+            "owner_id": owner_id,
             "rule": _stored(rule),
             "hits": 0,
             "version": 1,
@@ -127,7 +127,7 @@ def create_rule(owner_session_id: str, rule: Rule) -> RuleRecord:
     )
     return RuleRecord(
         rule_id,
-        owner_session_id,
+        owner_id,
         rule.model_copy(update={"rule_id": rule_id, "hits": 0}),
         1,
         now,
@@ -135,27 +135,25 @@ def create_rule(owner_session_id: str, rule: Rule) -> RuleRecord:
     )
 
 
-def find_rule(rule_id: str, owner_session_id: str) -> RuleRecord | None:
+def find_rule(rule_id: str, owner_id: str) -> RuleRecord | None:
     """One rule the caller owns, or None for both absent and not-theirs."""
-    document = _rules().find_one({"_id": rule_id, "owner_session_id": owner_session_id})
+    document = _rules().find_one({"_id": rule_id, "owner_id": owner_id})
     return None if document is None else _record(document)
 
 
-def list_rules(owner_session_id: str, limit: int = MAX_RULES_PER_SESSION) -> list[RuleRecord]:
+def list_rules(owner_id: str, limit: int = MAX_RULES_PER_SESSION) -> list[RuleRecord]:
     """A visitor's rules, most recently changed first."""
-    cursor = (
-        _rules().find({"owner_session_id": owner_session_id}).sort("updated_at", -1).limit(limit)
-    )
+    cursor = _rules().find({"owner_id": owner_id}).sort("updated_at", -1).limit(limit)
     return [_record(document) for document in cursor]
 
 
-def count_for_session(owner_session_id: str) -> int:
-    return _rules().count_documents({"owner_session_id": owner_session_id})
+def count_for_session(owner_id: str) -> int:
+    return _rules().count_documents({"owner_id": owner_id})
 
 
 def update_rule(
     rule_id: str,
-    owner_session_id: str,
+    owner_id: str,
     rule: Rule,
     *,
     if_version: int,
@@ -163,34 +161,34 @@ def update_rule(
     """Replace a rule's definition, guarded on the version read."""
     now = datetime.now(UTC)
     result = _rules().update_one(
-        {"_id": rule_id, "owner_session_id": owner_session_id, "version": if_version},
+        {"_id": rule_id, "owner_id": owner_id, "version": if_version},
         {"$set": {"rule": _stored(rule), "updated_at": now}, "$inc": {"version": 1}},
     )
     if result.matched_count == 0:
-        existing = _rules().find_one({"_id": rule_id, "owner_session_id": owner_session_id})
+        existing = _rules().find_one({"_id": rule_id, "owner_id": owner_id})
         if existing is None:
             raise KeyError(rule_id)
         raise StaleWriteError(
             "This rule was changed somewhere else after you opened it. "
             "Reload it to see the current version before saving again."
         )
-    updated = find_rule(rule_id, owner_session_id)
+    updated = find_rule(rule_id, owner_id)
     if updated is None:  # pragma: no cover - deleted between write and read
         raise KeyError(rule_id)
     return updated
 
 
-def delete_rule(rule_id: str, owner_session_id: str) -> bool:
+def delete_rule(rule_id: str, owner_id: str) -> bool:
     """Forget a rule.
 
     Runs that used it are unaffected: each snapshotted its rules into its own
     state, so deleting one cannot rewrite a migration's history.
     """
-    result = _rules().delete_one({"_id": rule_id, "owner_session_id": owner_session_id})
+    result = _rules().delete_one({"_id": rule_id, "owner_id": owner_id})
     return result.deleted_count > 0
 
 
-def set_enabled(rule_id: str, owner_session_id: str, *, enabled: bool) -> RuleRecord:
+def set_enabled(rule_id: str, owner_id: str, *, enabled: bool) -> RuleRecord:
     """Turn one of the caller's own rules on or off.
 
     Separate from `update_rule` and deliberately not version-guarded: toggling is
@@ -199,19 +197,19 @@ def set_enabled(rule_id: str, owner_session_id: str, *, enabled: bool) -> RuleRe
     """
     now = datetime.now(UTC)
     result = _rules().update_one(
-        {"_id": rule_id, "owner_session_id": owner_session_id},
+        {"_id": rule_id, "owner_id": owner_id},
         {"$set": {"rule.enabled": enabled, "updated_at": now}, "$inc": {"version": 1}},
     )
     if result.matched_count == 0:
         raise KeyError(rule_id)
-    updated = find_rule(rule_id, owner_session_id)
+    updated = find_rule(rule_id, owner_id)
     if updated is None:  # pragma: no cover
         raise KeyError(rule_id)
     return updated
 
 
 def override_builtin(
-    owner_session_id: str, builtin_rule_id: str, *, schema_id: str, rationale: str = ""
+    owner_id: str, builtin_rule_id: str, *, schema_id: str, rationale: str = ""
 ) -> RuleRecord:
     """Disable a shipped rule for this session.
 
@@ -222,7 +220,7 @@ def override_builtin(
     """
     existing = _rules().find_one(
         {
-            "owner_session_id": owner_session_id,
+            "owner_id": owner_id,
             "rule.kind": RuleKind.OVERRIDE.value,
             "rule.targets_rule_id": builtin_rule_id,
             "rule.schema_id": schema_id,
@@ -231,9 +229,9 @@ def override_builtin(
     if existing is not None:
         # Already overridden once and then re-enabled: flip it back rather than
         # accumulating a second override for the same target.
-        return set_enabled(str(existing["_id"]), owner_session_id, enabled=True)
+        return set_enabled(str(existing["_id"]), owner_id, enabled=True)
     return create_rule(
-        owner_session_id,
+        owner_id,
         Rule(
             kind=RuleKind.OVERRIDE,
             origin=RuleOrigin.OVERRIDE,
@@ -266,7 +264,7 @@ def record_hits(hits: dict[str, int]) -> None:
         logger.warning("could not record rule hits: %s", type(error).__name__)
 
 
-def resolve_rules(owner_session_id: str, schema: TargetSchema) -> RuleSet:
+def resolve_rules(owner_id: str, schema: TargetSchema) -> RuleSet:
     """The rules in force for one run: shipped, then the caller's own.
 
     Called once per run and snapshotted, so the rest of the engine never reaches
@@ -279,7 +277,7 @@ def resolve_rules(owner_session_id: str, schema: TargetSchema) -> RuleSet:
     """
     shipped = builtin_rules(schema)
     try:
-        session = tuple(record.rule for record in list_rules(owner_session_id))
+        session = tuple(record.rule for record in list_rules(owner_id))
     except Exception as error:
         logger.warning("rule store unavailable: %s", type(error).__name__)
         session = ()
@@ -287,4 +285,4 @@ def resolve_rules(owner_session_id: str, schema: TargetSchema) -> RuleSet:
 
 
 def ensure_indexes() -> None:
-    _rules().create_index([("owner_session_id", 1), ("updated_at", -1)])
+    _rules().create_index([("owner_id", 1), ("updated_at", -1)])

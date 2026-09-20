@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 
 from schemabridge.agent.config import MAPPING_INSTRUCTIONS
-from schemabridge.agent.llm import structured_model
+from schemabridge.agent.llm import invoke_structured
 from schemabridge.agent.schemas import MappingProposal
 from schemabridge.agent.tools import (
     check_proposed_mapping,
@@ -63,6 +64,10 @@ def propose_unresolved_mappings(
     already_taken: set[str],
     *,
     schema: TargetSchema,
+    run_id: str = "",
+    owner_id: str = "anonymous:shared",
+    workspace_kind: str = "anonymous",
+    expires_at: datetime | None = None,
     requests_used_in_run: int = 0,
 ) -> ProposalOutcome:
     """Ask the model about columns deterministic rules could not place."""
@@ -95,8 +100,15 @@ def propose_unresolved_mappings(
     )
 
     try:
-        model = structured_model(MappingProposal)
-        proposal = model.invoke([("system", MAPPING_INSTRUCTIONS), ("user", prompt)])
+        proposal = invoke_structured(
+            MappingProposal,
+            [("system", MAPPING_INSTRUCTIONS), ("user", prompt)],
+            operation="mapping-proposal",
+            run_id=run_id or "adhoc",
+            owner_id=owner_id,
+            workspace_kind=workspace_kind,
+            expires_at=expires_at or datetime.now(UTC) + timedelta(hours=48),
+        )
     except Exception as error:
         # Timeouts, provider errors and unparseable output all land here. The
         # columns simply stay unresolved.

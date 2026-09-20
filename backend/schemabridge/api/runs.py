@@ -3,8 +3,9 @@
 Four rules shape these routes.
 
 Ownership is checked on every operation. A run id is not a credential — it appears
-in URLs and screenshots — so the session cookie decides who may read or change a
-run.
+in URLs and screenshots — so the workspace resolved from the request decides who
+may read or change a run: a verified Google identity for a private workspace, or
+the absence of a token for the one deliberately shared by all guests.
 
 GET never mutates. The browser polls this API once or twice a second, and a GET
 with side effects would make that refresh loop an actor in the migration.
@@ -26,7 +27,7 @@ import logging
 from dataclasses import asdict
 from typing import Annotated, Any
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
 from starlette.concurrency import run_in_threadpool
 
 from schemabridge.api import rule_routes
@@ -53,8 +54,9 @@ from schemabridge.server import migration_quota
 from schemabridge.server import rules as rule_store
 from schemabridge.server import runs as registry
 from schemabridge.server import schemas as schema_store
+from schemabridge.server.auth import principal_from_request
 from schemabridge.server.budget import usage_today
-from schemabridge.server.sessions import ensure_session, read_session, require_same_origin
+from schemabridge.server.sessions import require_same_origin
 
 logger = logging.getLogger(__name__)
 
@@ -66,12 +68,14 @@ _DEMO_DELIVERY = {"E-1007": "fail_once", "E-1008": "reject"}
 
 
 def _owned_run(run_id: str, request: Request) -> registry.RunRecord:
-    """Fetch a run the caller is entitled to see."""
-    session_id = read_session(request)
+    """Fetch a run in the caller's resolved workspace.
+
+    The same answer whether the id is absent or belongs to another personal
+    workspace, so run ids cannot be used for enumeration.
+    """
+    principal = principal_from_request(request)
     record = registry.find_run(run_id)
-    # The same answer whether the run is absent or someone else's: revealing the
-    # difference would confirm that a guessed id exists.
-    if record is None or not session_id or record.owner_session_id != session_id:
+    if record is None or record.owner_id != principal.owner_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such run.")
     return record
 
@@ -152,11 +156,11 @@ def read_usage() -> dict[str, int]:
 
 
 @router.get("/migration-usage")
-def read_migration_usage(request: Request, response: Response) -> dict[str, str | int]:
-    """Authoritative daily starts remaining for this anonymous browser session."""
-    session_id = ensure_session(request, response)
+def read_migration_usage(request: Request) -> dict[str, str | int]:
+    """Authoritative daily starts remaining for this workspace."""
+    principal = principal_from_request(request)
     try:
-        usage = migration_quota.usage_for_session(session_id)
+        usage = migration_quota.usage_for_principal(principal)
     except Exception as error:
         logger.warning("migration quota unavailable: %s", type(error).__name__)
         raise HTTPException(
@@ -167,7 +171,9 @@ def read_migration_usage(request: Request, response: Response) -> dict[str, str 
         "used": usage.used,
         "limit": usage.limit,
         "reset_at": usage.reset_at.isoformat(),
-        "scope": "anonymous_browser_session",
+        "scope": usage.scope,
+        "workspace_kind": usage.workspace_kind,
+        "retention_hours": usage.retention_hours,
     }
 
 
@@ -189,7 +195,6 @@ def _run_rules(session_id: str, schema: TargetSchema) -> tuple[Rule, ...]:
 @router.post("/runs", status_code=status.HTTP_201_CREATED)
 async def create_run(
     request: Request,
-    response: Response,
     files: Annotated[list[UploadFile], File()],
     schema_id: Annotated[str | None, Form()] = None,
     schema_spec: Annotated[str | None, Form()] = None,
@@ -202,7 +207,7 @@ async def create_run(
     precedence when both are given.
     """
     require_same_origin(request)
-    session_id = ensure_session(request, response)
+    principal = principal_from_request(request)
 
     if not files:
         raise HTTPException(
@@ -269,11 +274,11 @@ async def create_run(
             detail=f"{len(rows)} rows exceeds the limit of {INGEST_LIMITS.max_total_rows}.",
         )
 
-    schema = _resolve_schema(schema_id, session_id, columns, profiles, schema_spec)
+    schema = _resolve_schema(schema_id, principal.owner_id, columns, profiles, schema_spec)
 
     run_id = registry.new_run_id()
     try:
-        migration_quota.reserve_migration_start(session_id, run_id)
+        reservation = migration_quota.reserve_migration_start(principal, run_id)
     except migration_quota.MigrationQuotaExhaustedError as error:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(error)
@@ -286,10 +291,10 @@ async def create_run(
         ) from None
 
     try:
-        registry.create_run(run_id, session_id, tuple(names), len(rows))
+        run_manifest = registry.create_run(run_id, principal, tuple(names), len(rows))
     except Exception as error:
         try:
-            migration_quota.release_migration_start(session_id, run_id)
+            migration_quota.release_migration_start(reservation)
         except Exception:
             logger.warning("migration quota release failed after registry error")
         logger.warning("run registry unavailable: %s", type(error).__name__)
@@ -300,7 +305,9 @@ async def create_run(
 
     initial: dict[str, Any] = {
         "run_id": run_id,
-        "owner_session_id": session_id,
+        "owner_id": principal.owner_id,
+        "workspace_kind": principal.kind,
+        "run_expires_at": run_manifest.expires_at,
         "files": tuple(sources),
         "columns": tuple(columns),
         "rows": tuple(rows),
@@ -316,7 +323,7 @@ async def create_run(
         # run may add rules to the store partway through, and a run that re-read the
         # store on resume would apply rules to its second half that its first half
         # never saw.
-        "rules": _run_rules(session_id, schema),
+        "rules": _run_rules(principal.owner_id, schema),
         "proposed_rules": (),
         "induced_for": (),
         "phase": RunPhase.INGESTED,
@@ -328,15 +335,17 @@ async def create_run(
     }
 
     # Off the event loop: the workflow delivers over HTTP to this same app.
-    result = await run_in_threadpool(runner.start, initial, run_id)
+    result = await run_in_threadpool(
+        runner.start, initial, run_id, principal.kind, run_manifest.expires_at
+    )
     return build_run_view(run_id, result.state, paused=result.paused, runnable=result.runnable)
 
 
 @router.get("/runs/{run_id}")
 def read_run(run_id: str, request: Request, since: int = 0) -> RunView:
     """The current state. Safe to poll; never mutates."""
-    _owned_run(run_id, request)
-    state = runner.read_state(run_id)
+    record = _owned_run(run_id, request)
+    state = runner.read_state(run_id, record.workspace_kind)
     if state is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such run.")
     return build_run_view(
@@ -382,9 +391,11 @@ def _record_rule_hits(state: dict[str, Any]) -> None:
 async def advance_run(run_id: str, request: Request) -> RunView:
     """Do the next bounded piece of work."""
     require_same_origin(request)
-    _owned_run(run_id, request)
+    record = _owned_run(run_id, request)
     try:
-        result = await run_in_threadpool(runner.advance, run_id)
+        result = await run_in_threadpool(
+            runner.advance, run_id, record.workspace_kind, record.expires_at
+        )
     except Exception as error:
         logger.exception("advance failed for %s", run_id)
         raise HTTPException(
@@ -404,7 +415,7 @@ async def resolve_run(run_id: str, request: Request, decisions: dict[str, Any]) 
     revalidates.
     """
     require_same_origin(request)
-    _owned_run(run_id, request)
+    record = _owned_run(run_id, request)
 
     if not decisions:
         raise HTTPException(
@@ -412,7 +423,9 @@ async def resolve_run(run_id: str, request: Request, decisions: dict[str, Any]) 
         )
 
     try:
-        result = await run_in_threadpool(runner.resolve, run_id, decisions)
+        result = await run_in_threadpool(
+            runner.resolve, run_id, decisions, record.workspace_kind, record.expires_at
+        )
     except Exception as error:
         logger.exception("resolve failed for %s", run_id)
         raise HTTPException(
@@ -424,19 +437,19 @@ async def resolve_run(run_id: str, request: Request, decisions: dict[str, Any]) 
 
 @router.get("/runs")
 def list_runs(request: Request) -> dict[str, Any]:
-    """The caller's own runs."""
-    session_id = read_session(request)
-    if not session_id:
-        return {"runs": []}
+    """The personal or deliberately shared guest workspace's runs."""
+    principal = principal_from_request(request)
     return {
         "runs": [
             {
                 "run_id": record.run_id,
                 "created_at": record.created_at.isoformat(),
+                "expires_at": record.expires_at.isoformat(),
+                "workspace_kind": record.workspace_kind,
                 "files": list(record.file_names),
                 "source_rows": record.source_rows,
             }
-            for record in registry.list_runs(session_id)
+            for record in registry.list_runs(principal.owner_id)
         ]
     }
 
@@ -448,8 +461,8 @@ def read_proposed_rules(run_id: str, request: Request) -> dict[str, Any]:
     A GET, so it never mutates: declining a proposal is simply not accepting it,
     and needs no route of its own.
     """
-    _owned_run(run_id, request)
-    state = runner.read_state(run_id)
+    record = _owned_run(run_id, request)
+    state = runner.read_state(run_id, record.workspace_kind)
     if state is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such run.")
     return {
@@ -478,8 +491,8 @@ def accept_proposed_rule(run_id: str, proposal_id: str, request: Request) -> dic
     """
     require_same_origin(request)
     record = _owned_run(run_id, request)
-    session_id = record.owner_session_id
-    state = runner.read_state(run_id)
+    owner_id = record.owner_id
+    state = runner.read_state(run_id, record.workspace_kind)
     if state is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such run.")
 
@@ -494,13 +507,13 @@ def accept_proposed_rule(run_id: str, proposal_id: str, request: Request) -> dic
         existing = next(
             (
                 candidate
-                for candidate in rule_store.list_rules(session_id)
+                for candidate in rule_store.list_rules(owner_id)
                 if _same_rule(candidate.rule, proposal.rule)
             ),
             None,
         )
         stored = (
-            existing if existing is not None else rule_store.create_rule(session_id, proposal.rule)
+            existing if existing is not None else rule_store.create_rule(owner_id, proposal.rule)
         )
     except rule_store.RuleLimitError as limit:
         raise HTTPException(

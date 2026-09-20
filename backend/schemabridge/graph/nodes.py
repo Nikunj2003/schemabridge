@@ -239,6 +239,10 @@ def assist_with_model(state: MigrationState) -> dict[str, Any]:
         unresolved,
         taken,
         schema=schema,
+        run_id=str(state.get("run_id", "")),
+        owner_id=str(state.get("owner_id", "anonymous:shared")),
+        workspace_kind=str(state.get("workspace_kind", "anonymous")),
+        expires_at=state.get("run_expires_at"),
         # The committed counter, not a local tally: this node can be reached again
         # after a pause, in a different process, and the checkpoint is the only
         # place that remembers what the run has already spent.
@@ -631,6 +635,9 @@ def induce_rules(state: MigrationState) -> dict[str, Any]:
             chosen,
             schema=schema,
             run_id=run_id,
+            owner_id=str(state.get("owner_id", "anonymous:shared")),
+            workspace_kind=str(state.get("workspace_kind", "anonymous")),
+            expires_at=state.get("run_expires_at"),
             # So a decision about a column the schema itself makes ambiguous is
             # filtered before a request is spent on a rule that cannot be accepted.
             column_header=headers.get(issue.column_id or "", ""),
@@ -1043,6 +1050,7 @@ def deliver(state: MigrationState) -> dict[str, Any]:
                 schema=schema,
                 request_origin=state.get("request_origin"),
                 attempt_number=attempt_number,
+                run_expires_at=state.get("run_expires_at"),
                 demo_headers=demo_headers or None,
             )
 

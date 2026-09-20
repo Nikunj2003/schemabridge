@@ -44,7 +44,7 @@ export default function LandingPage() {
               </div>
 
               <p className="mt-5 text-[13px] text-ink-subtle">
-                Free with synthetic data only. Up to 10 migrations a day.
+                Free with synthetic data only. 20 private starts per account daily, or 100 shared guest starts.
               </p>
             </div>
 
@@ -119,7 +119,7 @@ export default function LandingPage() {
                 Records go to a simulated HR system inside this app. Nothing is sent anywhere else.
               </Limit>
               <Limit term="Synthetic data only">
-                Do not upload real personal information. Uploads are deleted after 48 hours.
+                Do not upload real personal information. Guest uploads are deleted after two days; private Google workspaces after seven.
               </Limit>
               <Limit term="Schemas need review">
                 Build, import, or detect a target shape, then confirm its fields before relying on it for a client.

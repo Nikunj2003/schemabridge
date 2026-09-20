@@ -38,6 +38,22 @@ class Settings(BaseSettings):
     mongodb_uri: str = Field(default="", alias="MONGODB_URI")
     mongodb_db: str = Field(default="schemabridge", alias="MONGODB_DB")
 
+    # --- Identity --------------------------------------------------------
+    #: Issuer URL without a trailing slash, for example
+    #: ``https://example.us.auth0.com``. The browser receives only the matching
+    #: ``NEXT_PUBLIC_*`` values; API validation settings remain server-only.
+    auth0_issuer: str = Field(default="", alias="AUTH0_ISSUER")
+    auth0_audience: str = Field(default="", alias="AUTH0_AUDIENCE")
+    auth0_jwks_cache_seconds: int = Field(default=3600, alias="AUTH0_JWKS_CACHE_SECONDS")
+
+    # --- Optional LLM telemetry -----------------------------------------
+    langfuse_enabled: bool = Field(default=False, alias="LANGFUSE_ENABLED")
+    langfuse_public_key: str = Field(default="", alias="LANGFUSE_PUBLIC_KEY")
+    langfuse_secret_key: str = Field(default="", alias="LANGFUSE_SECRET_KEY")
+    langfuse_host: str = Field(default="https://cloud.langfuse.com", alias="LANGFUSE_HOST")
+    langfuse_capture_content: bool = Field(default=False, alias="LANGFUSE_CAPTURE_CONTENT")
+    observability_api_secret: str = Field(default="", alias="OBSERVABILITY_API_SECRET")
+
     # --- Destination connector -------------------------------------------
     target_api_secret: str = Field(default="", alias="TARGET_API_SECRET")
     #: Where outbound delivery is sent. Must be an origin *this service* can
@@ -58,14 +74,31 @@ class Settings(BaseSettings):
     max_model_requests_per_run: int = Field(default=6, alias="AI_MAX_REQUESTS_PER_RUN")
     max_model_requests_per_day: int = Field(default=400, alias="AI_MAX_REQUESTS_PER_DAY")
     #: Starts allowed for one anonymous browser session in an India calendar day.
-    max_migration_starts_per_session_per_day: int = Field(
-        default=10, alias="MIGRATION_MAX_RUNS_PER_DAY"
+    #: Starts allowed for one verified Google account each India calendar day.
+    authenticated_migration_starts_per_day: int = Field(
+        default=20, alias="AUTHENTICATED_MIGRATION_MAX_RUNS_PER_DAY"
     )
+    #: Starts shared by every person deliberately using the anonymous workspace.
+    anonymous_migration_starts_per_day: int = Field(
+        default=100, alias="ANONYMOUS_MIGRATION_MAX_RUNS_PER_DAY"
+    )
+    #: Kept as a compatibility alias while deployments move to the explicit
+    #: workspace settings; new code must use one of the two policies above.
+    max_migration_starts_per_session_per_day: int = Field(
+        default=100, alias="MIGRATION_MAX_RUNS_PER_DAY"
+    )
+    nvidia_requests_per_minute: int = Field(default=45, alias="NVIDIA_REQUESTS_PER_MINUTE")
+    nvidia_retry_attempts: int = Field(default=3, alias="NVIDIA_RETRY_ATTEMPTS")
+    nvidia_max_queue_seconds: float = Field(default=45.0, alias="NVIDIA_MAX_QUEUE_SECONDS")
 
     # --- Runtime ---------------------------------------------------------
     # Kept below the platform's 300 s function ceiling so a step returns a
     # checkpoint rather than being killed mid-write.
     advance_budget_seconds: float = Field(default=120.0, alias="ADVANCE_BUDGET_SECONDS")
+    authenticated_retention_hours: int = Field(default=168, alias="AUTHENTICATED_RETENTION_HOURS")
+    anonymous_retention_hours: int = Field(default=48, alias="ANONYMOUS_RETENTION_HOURS")
+    #: The legacy checkpointer TTL remains only for records written before
+    #: workspace-aware expiry is enabled.
     run_ttl_hours: int = Field(default=48, alias="RUN_TTL_HOURS")
 
     @property
@@ -76,6 +109,18 @@ class Settings(BaseSettings):
     @property
     def has_database(self) -> bool:
         return bool(self.mongodb_uri.strip())
+
+    @property
+    def auth0_configured(self) -> bool:
+        return bool(self.auth0_issuer.strip() and self.auth0_audience.strip())
+
+    @property
+    def langfuse_configured(self) -> bool:
+        return bool(
+            self.langfuse_enabled
+            and self.langfuse_public_key.strip()
+            and self.langfuse_secret_key.strip()
+        )
 
     def require_model_key(self) -> str:
         if not self.nvidia_api_key.strip():

@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 
 from schemabridge import __version__
 from schemabridge.api.mock_target import router as mock_target_router
+from schemabridge.api.observability import router as observability_router
 from schemabridge.api.rule_routes import router as rules_router
 from schemabridge.api.runs import router as runs_router
 from schemabridge.api.schema_routes import router as schemas_router
@@ -35,6 +36,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             from schemabridge.server import (
                 budget,
                 migration_quota,
+                model_exchanges,
+                model_rate_limit,
                 receipts,
                 rules,
                 runs,
@@ -47,6 +50,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             schemas.ensure_indexes()
             rules.ensure_indexes()
             migration_quota.ensure_indexes()
+            model_exchanges.ensure_indexes()
+            model_rate_limit.ensure_indexes()
         except Exception:
             logger.warning("could not create indexes at startup", exc_info=False)
     yield
@@ -76,6 +81,7 @@ app.include_router(runs_router)
 app.include_router(schemas_router)
 app.include_router(rules_router)
 app.include_router(mock_target_router)
+app.include_router(observability_router)
 
 
 @app.get("/api/health")

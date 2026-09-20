@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useId, useState } from "react";
+import { useWorkspace } from "@/components/auth/workspace-provider";
 import { AuthorStrip } from "@/components/brand/author";
 import { Wordmark } from "@/components/brand/logo";
 import { useMigrationUsage } from "@/components/app/migration-usage";
@@ -150,7 +151,7 @@ function NavLink({
   );
 }
 
-/** How much this anonymous browser session can still start today. */
+/** How much the current workspace can still start today, and how long it keeps data. */
 export function AllowanceMeter({
   usage,
   error,
@@ -172,7 +173,10 @@ export function AllowanceMeter({
       <div className="mt-2 h-1 overflow-hidden rounded-full bg-line-strong">
         <div className="h-full rounded-full bg-accent transition-[width]" style={{ width: `${pct}%` }} />
       </div>
-      <p className="mt-1.5 text-[12px] text-ink-subtle">Resets {resetAt(usage.reset_at)}</p>
+      <p className="mt-1.5 text-[12px] text-ink-subtle">
+        {usage.workspace_kind === "authenticated" ? "Private · 7-day retention" : "Shared · 2-day retention"}
+      </p>
+      <p className="mt-1 text-[12px] text-ink-subtle">Resets {resetAt(usage.reset_at)}</p>
     </div>
   );
 }
@@ -191,6 +195,8 @@ function AccountMenu({
   setOpen: (value: boolean) => void;
 }) {
   const id = useId();
+  const { mode, displayName, signOut, switchToSharedWorkspace } = useWorkspace();
+  const initial = displayName.slice(0, 1).toUpperCase();
   return (
     <div className="relative">
       <button
@@ -199,8 +205,8 @@ function AccountMenu({
         onClick={() => setOpen(!open)}
         className="flex items-center gap-2 rounded-md py-1 pl-1 pr-1.5 text-[13.5px] hover:bg-sunken"
       >
-        <span className="flex size-7 items-center justify-center rounded-full bg-accent-soft text-[12px] font-semibold text-accent-ink">A</span>
-        <span className="hidden max-w-[14ch] truncate sm:inline">Anonymous</span>
+        <span className="flex size-7 items-center justify-center rounded-full bg-accent-soft text-[12px] font-semibold text-accent-ink">{initial}</span>
+        <span className="hidden max-w-[14ch] truncate sm:inline">{displayName}</span>
         <IconChevron />
       </button>
 
@@ -217,8 +223,12 @@ function AccountMenu({
             className="panel absolute right-0 top-full z-20 mt-1.5 w-56 p-1 shadow-pop"
           >
             <div className="px-2.5 py-2">
-              <p className="text-[13.5px] font-medium">Anonymous browser session</p>
-              <p className="text-[12.5px] text-ink-muted">Your migrations are available in this browser.</p>
+              <p className="text-[13.5px] font-medium">{displayName}</p>
+              <p className="text-[12.5px] text-ink-muted">
+                {mode === "authenticated"
+                  ? "Your migrations are private and retained for seven days."
+                  : "This workspace is shared and retained for two days."}
+              </p>
             </div>
             <div className="my-1 h-px bg-line" />
             <Link href="/app/usage" className="block rounded px-2.5 py-1.5 text-[13.5px] hover:bg-sunken">
@@ -231,6 +241,20 @@ function AccountMenu({
               Rules
             </Link>
             <div className="my-1 h-px bg-line" />
+            {mode === "authenticated" ? (
+              <>
+                <button onClick={switchToSharedWorkspace} className="block w-full rounded px-2.5 py-1.5 text-left text-[13.5px] hover:bg-sunken">
+                  Use shared workspace
+                </button>
+                <button onClick={signOut} className="block w-full rounded px-2.5 py-1.5 text-left text-[13.5px] hover:bg-sunken">
+                  Sign out
+                </button>
+              </>
+            ) : (
+              <Link href="/signin" className="block rounded px-2.5 py-1.5 text-[13.5px] hover:bg-sunken">
+                Sign in with Google
+              </Link>
+            )}
             <Link href="/" className="block rounded px-2.5 py-1.5 text-[13.5px] hover:bg-sunken">
               Back to home
             </Link>

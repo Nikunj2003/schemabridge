@@ -342,17 +342,18 @@ class TestDeliveryOutcomes:
         assert all(record["target_id"] for record in delivered)
 
 
-class TestOwnership:
-    def test_another_visitor_cannot_read_a_run(self, client: httpx.Client, origin: str) -> None:
+class TestSharedAnonymousWorkspace:
+    def test_another_guest_can_read_a_shared_run(self, client: httpx.Client, origin: str) -> None:
         run_id = upload(client, "employees-clean.csv").json()["run_id"]
 
-        # A fresh client means a fresh session: the run id alone must not grant
-        # access.
+        # An unauthenticated request selects the deliberately shared guest workspace.
         with httpx.Client(base_url=origin, timeout=30) as stranger:
             response = stranger.get(f"/api/runs/{run_id}")
-        assert response.status_code == 404
+        assert response.status_code == 200
 
-    def test_another_visitor_cannot_resolve_a_run(self, client: httpx.Client, origin: str) -> None:
+    def test_another_guest_can_resolve_a_shared_run(
+        self, client: httpx.Client, origin: str
+    ) -> None:
         created = start(client, "employees-legacy.csv", "employees-hr-export.csv")
         run_id = created["run_id"]
         issue_id = created["issues"][0]["id"]
@@ -362,16 +363,16 @@ class TestOwnership:
                 f"/api/runs/{run_id}/resolve",
                 json={issue_id: {"action": "approve"}},
             )
-        assert response.status_code == 404
+        assert response.status_code == 200
 
-    def test_a_session_sees_only_its_own_runs(self, client: httpx.Client, origin: str) -> None:
+    def test_guests_see_the_same_shared_runs(self, client: httpx.Client, origin: str) -> None:
         upload(client, "employees-clean.csv")
         mine = {run["run_id"] for run in client.get("/api/runs").json()["runs"]}
         assert mine
 
         with httpx.Client(base_url=origin, timeout=30) as stranger:
             theirs = {run["run_id"] for run in stranger.get("/api/runs").json()["runs"]}
-        assert not (mine & theirs)
+        assert mine <= theirs
 
 
 class TestUploadValidation:
@@ -528,12 +529,12 @@ class TestSchemaCrud:
         assert response.status_code == 400
         assert "identify" in response.json()["detail"]
 
-    def test_another_visitor_cannot_see_it(self, origin: str, client: httpx.Client) -> None:
-        """A schema id appears in URLs, so it is not a credential."""
+    def test_another_guest_can_see_a_shared_schema(self, origin: str, client: httpx.Client) -> None:
+        """Schemas created in the guest workspace are deliberately shared."""
         schema_id = client.post("/api/schemas", json=ORDER_SCHEMA).json()["schema_id"]
         try:
             with httpx.Client(base_url=origin, timeout=30) as stranger:
-                assert stranger.get(f"/api/schemas/{schema_id}").status_code in {401, 404}
+                assert stranger.get(f"/api/schemas/{schema_id}").status_code == 200
         finally:
             client.delete(f"/api/schemas/{schema_id}")
 
@@ -738,13 +739,13 @@ class TestSpecImportAndExport:
         start = next(f for f in restored["fields"] if f["name"] == "startDate")
         assert "doj" in start["spellings"]
 
-    def test_another_visitor_cannot_export_your_schema(
+    def test_another_guest_can_export_a_shared_schema(
         self, origin: str, client: httpx.Client
     ) -> None:
         schema_id = client.post("/api/schemas", json=ORDER_SCHEMA).json()["schema_id"]
         try:
             with httpx.Client(base_url=origin, timeout=30) as stranger:
-                assert stranger.get(f"/api/schemas/{schema_id}/spec").status_code in {401, 404}
+                assert stranger.get(f"/api/schemas/{schema_id}/spec").status_code == 200
         finally:
             client.delete(f"/api/schemas/{schema_id}")
 

@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { ContentFrame } from "@/components/app/content-frame";
 import { ButtonLink } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useMigrationUsage } from "@/components/app/migration-usage";
 import { api } from "@/lib/api";
 
 interface Row {
@@ -14,8 +15,9 @@ interface Row {
   source_rows: number;
 }
 
-/** The runs this person owns, newest first. */
+/** The current personal or intentionally shared workspace's runs, newest first. */
 export function MigrationList() {
+  const { usage } = useMigrationUsage();
   const [rows, setRows] = useState<Row[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -90,7 +92,9 @@ export function MigrationList() {
       )}
 
       <p className="mt-8 text-[12.5px] text-ink-muted">
-        Migrations are kept for 48 hours, then deleted.
+        {usage?.workspace_kind === "authenticated"
+          ? "Private migrations are kept for seven days, then deleted."
+          : "Shared anonymous migrations are visible to every guest and kept for two days."}
       </p>
     </ContentFrame>
   );

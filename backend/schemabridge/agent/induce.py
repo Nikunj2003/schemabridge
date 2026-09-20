@@ -31,9 +31,10 @@ from __future__ import annotations
 
 import logging
 import secrets
+from datetime import UTC, datetime, timedelta
 
 from schemabridge.agent.config import RULE_INDUCTION_INSTRUCTIONS
-from schemabridge.agent.llm import structured_model
+from schemabridge.agent.llm import invoke_structured
 from schemabridge.agent.sanitize import safe_value
 from schemabridge.agent.schemas import ProposedRuleDraft
 from schemabridge.domain.models import IssueType, ResolutionAction, ReviewIssue
@@ -193,6 +194,9 @@ def propose_rule_from_decision(
     *,
     schema: TargetSchema,
     run_id: str,
+    owner_id: str = "anonymous:shared",
+    workspace_kind: str = "anonymous",
+    expires_at: datetime | None = None,
     column_header: str = "",
     requests_used_in_run: int = 0,
     pre_approved: bool = False,
@@ -235,8 +239,15 @@ def propose_rule_from_decision(
     )
 
     try:
-        model = structured_model(ProposedRuleDraft)
-        draft = model.invoke([("system", RULE_INDUCTION_INSTRUCTIONS), ("user", prompt)])
+        draft = invoke_structured(
+            ProposedRuleDraft,
+            [("system", RULE_INDUCTION_INSTRUCTIONS), ("user", prompt)],
+            operation="rule-induction",
+            run_id=run_id,
+            owner_id=owner_id,
+            workspace_kind=workspace_kind,
+            expires_at=expires_at or datetime.now(UTC) + timedelta(hours=48),
+        )
     except Exception as error:
         logger.warning("rule induction failed: %s", type(error).__name__)
         return None, 1, f"No rule was drafted ({type(error).__name__})."

@@ -233,10 +233,10 @@ class TestGracefulDegradation:
 
         monkeypatch.setattr(propose, "reserve_model_request", lambda count=1: 1)
 
-        def explode(_schema: type, **_kwargs: Any) -> Any:
+        def explode(*_args: Any, **_kwargs: Any) -> Any:
             raise TimeoutError("endpoint congested")
 
-        monkeypatch.setattr(propose, "structured_model", explode)
+        monkeypatch.setattr(propose, "invoke_structured", explode)
 
         outcome = propose.propose_unresolved_mappings(
             [column("c1", "Cost Centre Ref")],
@@ -261,12 +261,12 @@ class TestGracefulDegradation:
         monkeypatch.setattr(propose, "reserve_model_request", refuse)
         called = False
 
-        def should_not_run(_schema: type, **_kwargs: Any) -> Any:
+        def should_not_run(*_args: Any, **_kwargs: Any) -> Any:
             nonlocal called
             called = True
             raise AssertionError("no request should be made once the budget is spent")
 
-        monkeypatch.setattr(propose, "structured_model", should_not_run)
+        monkeypatch.setattr(propose, "invoke_structured", should_not_run)
 
         outcome = propose.propose_unresolved_mappings(
             [column("c1", "Cost Centre Ref")],

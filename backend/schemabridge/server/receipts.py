@@ -51,6 +51,8 @@ def store_receipt(
     target_id: str,
     payload_hash: str,
     employee: dict[str, Any],
+    *,
+    expires_at: datetime | None = None,
 ) -> Receipt:
     """Record acceptance exactly once for a given key.
 
@@ -70,7 +72,7 @@ def store_receipt(
                 "payload_hash": payload_hash,
                 "employee": employee,
                 "created_at": now,
-                "expires_at": now + timedelta(hours=settings.run_ttl_hours),
+                "expires_at": expires_at or now + timedelta(hours=settings.run_ttl_hours),
             }
         )
     except DuplicateKeyError:

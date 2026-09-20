@@ -27,6 +27,7 @@ reopening the run continues from where it stopped.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from langgraph.types import Command
@@ -47,9 +48,12 @@ _STEPS_PER_CALL = 2
 _STEPS_ON_CREATE = 0
 
 
-def _config(run_id: str) -> dict[str, Any]:
-    """The graph's per-run configuration. `thread_id` is the run itself."""
-    return {"configurable": {"thread_id": run_id}}
+def _config(run_id: str, run_expires_at: datetime | None = None) -> dict[str, Any]:
+    """The graph's per-run configuration and immutable persistence deadline."""
+    configurable: dict[str, Any] = {"thread_id": run_id}
+    if run_expires_at is not None:
+        configurable["run_expires_at"] = run_expires_at
+    return {"configurable": configurable}
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,8 +70,8 @@ class AdvanceResult:
     runnable: bool
 
 
-def _graph() -> Any:
-    return compile_graph(build_checkpointer())
+def _graph(workspace_kind: str = "legacy") -> Any:
+    return compile_graph(build_checkpointer(workspace_kind))
 
 
 def _interrupts(snapshot: Any) -> tuple[dict[str, Any], ...]:
@@ -81,7 +85,9 @@ def _interrupts(snapshot: Any) -> tuple[dict[str, Any], ...]:
     )
 
 
-def _run_bounded(graph: Any, run_id: str, payload: Any, limit: int) -> None:
+def _run_bounded(
+    graph: Any, run_id: str, payload: Any, limit: int, run_expires_at: datetime | None = None
+) -> None:
     """Run at most `limit` supersteps, then leave the rest for the next call.
 
     Breaking out of the stream stops before the next task is started; the
@@ -89,11 +95,12 @@ def _run_bounded(graph: Any, run_id: str, payload: Any, limit: int) -> None:
     resumes from. A limit of zero still submits the input, so the initial state is
     persisted without executing a node.
     """
-    stream = graph.stream(payload, _config(run_id), stream_mode="updates")
+    config = _config(run_id, run_expires_at)
+    stream = graph.stream(payload, config, stream_mode="updates")
     if limit <= 0:
         # Nothing to execute, but the input must still be checkpointed. Closing
         # the generator without consuming it would discard the state entirely.
-        graph.update_state(_config(run_id), payload) if payload is not None else None
+        graph.update_state(config, payload) if payload is not None else None
         stream.close()
         return
 
@@ -107,34 +114,46 @@ def _run_bounded(graph: Any, run_id: str, payload: Any, limit: int) -> None:
         stream.close()
 
 
-def start(initial_state: dict[str, Any], run_id: str) -> AdvanceResult:
+def start(
+    initial_state: dict[str, Any],
+    run_id: str,
+    workspace_kind: str = "legacy",
+    run_expires_at: datetime | None = None,
+) -> AdvanceResult:
     """Accept a run: persist the parsed sources, execute nothing yet."""
-    graph = _graph()
-    _run_bounded(graph, run_id, initial_state, _STEPS_ON_CREATE)
+    graph = _graph(workspace_kind)
+    _run_bounded(graph, run_id, initial_state, _STEPS_ON_CREATE, run_expires_at)
     return _describe(graph, run_id)
 
 
-def advance(run_id: str) -> AdvanceResult:
+def advance(
+    run_id: str, workspace_kind: str = "legacy", run_expires_at: datetime | None = None
+) -> AdvanceResult:
     """Do the next bounded piece of work."""
-    graph = _graph()
-    _run_bounded(graph, run_id, None, _STEPS_PER_CALL)
+    graph = _graph(workspace_kind)
+    _run_bounded(graph, run_id, None, _STEPS_PER_CALL, run_expires_at)
     return _describe(graph, run_id)
 
 
-def resolve(run_id: str, decisions: dict[str, Any]) -> AdvanceResult:
+def resolve(
+    run_id: str,
+    decisions: dict[str, Any],
+    workspace_kind: str = "legacy",
+    run_expires_at: datetime | None = None,
+) -> AdvanceResult:
     """Supply the reviewer's decisions and carry on, still bounded."""
-    graph = _graph()
-    _run_bounded(graph, run_id, Command(resume=decisions), _STEPS_PER_CALL)
+    graph = _graph(workspace_kind)
+    _run_bounded(graph, run_id, Command(resume=decisions), _STEPS_PER_CALL, run_expires_at)
     return _describe(graph, run_id)
 
 
-def read_state(run_id: str) -> dict[str, Any] | None:
+def read_state(run_id: str, workspace_kind: str = "legacy") -> dict[str, Any] | None:
     """The current state, without advancing anything.
 
     Used by polling, so it must never mutate: a GET that changes state would
     make the UI's refresh loop an accidental actor in the migration.
     """
-    snapshot = _graph().get_state(_config(run_id))
+    snapshot = _graph(workspace_kind).get_state(_config(run_id))
     if not snapshot.values:
         return None
     pending = _interrupts(snapshot)

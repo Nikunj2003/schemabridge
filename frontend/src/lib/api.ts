@@ -119,7 +119,9 @@ export interface MigrationUsage {
   used: number;
   limit: number;
   reset_at: string;
-  scope: "anonymous_browser_session";
+  scope: "authenticated_user" | "shared_anonymous";
+  workspace_kind: "authenticated" | "anonymous";
+  retention_hours: number;
 }
 
 export interface Counters {
@@ -384,16 +386,36 @@ async function describeError(response: Response): Promise<string> {
   return `The request failed (${response.status}).`;
 }
 
+type AccessTokenProvider = () => Promise<string | null>;
+
+let accessTokenProvider: AccessTokenProvider | null = null;
+
+/** Installed by the workspace provider; never accepts identity from callers. */
+export function configureAccessTokenProvider(provider: AccessTokenProvider | null) {
+  accessTokenProvider = provider;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = accessTokenProvider ? await accessTokenProvider() : null;
+  const headers = new Headers(init?.headers);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
   const response = await fetch(path, {
     ...init,
-    // Sessions live in an HttpOnly cookie, so it has to travel with the request.
+    headers,
     credentials: "same-origin",
   });
   if (!response.ok) {
     throw new ApiError(await describeError(response), response.status);
   }
   return (await response.json()) as T;
+}
+
+async function requestEmpty(path: string, init: RequestInit): Promise<void> {
+  const token = accessTokenProvider ? await accessTokenProvider() : null;
+  const headers = new Headers(init.headers);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetch(path, { ...init, headers, credentials: "same-origin" });
+  if (!response.ok) throw new ApiError(await describeError(response), response.status);
 }
 
 export const api = {
@@ -462,14 +484,7 @@ export const api = {
     /** Where to download a schema as a YAML spec. */
     specUrl: (schemaId: string) => `/api/schemas/${schemaId}/spec`,
 
-    remove: async (schemaId: string) => {
-      const response = await fetch(`/api/schemas/${schemaId}`, {
-        method: "DELETE",
-        credentials: "same-origin",
-      });
-      // 204 carries no body, so this one cannot go through `request`.
-      if (!response.ok) throw new ApiError(await describeError(response), response.status);
-    },
+    remove: (schemaId: string) => requestEmpty(`/api/schemas/${schemaId}`, { method: "DELETE" }),
   },
 
   rules: {
@@ -516,14 +531,7 @@ export const api = {
         body: JSON.stringify({ enabled, ...(schemaId ? { schema_id: schemaId } : {}) }),
       }),
 
-    remove: async (ruleId: string) => {
-      const response = await fetch(`/api/rules/${ruleId}`, {
-        method: "DELETE",
-        credentials: "same-origin",
-      });
-      // 204 carries no body, so this one cannot go through `request`.
-      if (!response.ok) throw new ApiError(await describeError(response), response.status);
-    },
+    remove: (ruleId: string) => requestEmpty(`/api/rules/${ruleId}`, { method: "DELETE" }),
 
     /**
      * What a draft rule would change in these files, without saving the rule.

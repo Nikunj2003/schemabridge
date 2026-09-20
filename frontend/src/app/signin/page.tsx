@@ -1,54 +1,55 @@
-import Link from "next/link";
-import { Wordmark } from "@/components/brand/logo";
+"use client";
 
-/**
- * Sign in.
- *
- * One way in, on its own page: Google through Auth0. No password fields, no
- * email capture, nothing to read past before deciding.
- */
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { Wordmark } from "@/components/brand/logo";
+import { useWorkspace } from "@/components/auth/workspace-provider";
+
+/** Choose a private Google-backed workspace or the explicitly shared guest one. */
 export default function SignInPage() {
+  const router = useRouter();
+  const { configured, signInWithGoogle, switchToSharedWorkspace } = useWorkspace();
+
   return (
     <div className="flex min-h-dvh flex-col">
       <header className="flex h-14 shrink-0 items-center px-4 sm:px-8">
-        <Link href="/">
-          <Wordmark />
-        </Link>
+        <Link href="/"><Wordmark /></Link>
       </header>
-
       <main className="flex flex-1 items-center justify-center px-4 pb-16">
         <div className="w-full max-w-[24rem]">
-          <h1 className="text-center font-display text-[25px]">Sign in to SchemaBridge</h1>
+          <h1 className="text-center font-display text-[25px]">Choose your workspace</h1>
           <p className="mt-2 text-center text-[14px] text-ink-muted">
-            Your migrations and decisions are saved to your account.
+            Google sign-in keeps your migrations private for seven days.
           </p>
-
-          <div className="panel mt-7 px-5 py-6">
-            {/* Wired to the NextAuth Auth0 route next; disabled rather than
-                pretending to work. */}
+          <div className="panel mt-7 space-y-3 px-5 py-6">
             <button
-              disabled
+              onClick={() => void signInWithGoogle()}
+              disabled={!configured}
               className="flex h-11 w-full items-center justify-center gap-3 rounded-md border border-line-strong bg-surface text-[14.5px] font-medium disabled:opacity-55"
             >
-              <GoogleMark />
-              Continue with Google
+              <GoogleMark /> Continue with Google
             </button>
-
-            <p className="mt-4 text-center text-[12.5px] text-ink-muted">
-              Google sign-in is being connected. Until then the app runs without
-              an account.
-            </p>
-
-            <Link
-              href="/app"
-              className="mt-4 block text-center text-[13.5px] font-medium text-accent underline-offset-4 hover:underline"
+            {!configured && (
+              <p className="text-center text-[12.5px] text-ink-muted">
+                Google sign-in will be available after this deployment receives its Auth0 public settings.
+              </p>
+            )}
+            <div className="my-1 h-px bg-line" />
+            <button
+              onClick={() => {
+                switchToSharedWorkspace();
+                router.push("/app");
+              }}
+              className="h-11 w-full rounded-md border border-line bg-sunken text-[14px] font-medium text-ink-muted hover:bg-surface"
             >
-              Continue without signing in
-            </Link>
+              Continue in shared anonymous workspace
+            </button>
+            <p className="text-center text-[12.5px] leading-relaxed text-ink-muted">
+              Anonymous migrations, records, rules, and audit entries are visible to everyone using this shared workspace and are deleted after two days.
+            </p>
           </div>
-
           <p className="mt-5 text-center text-[12.5px] leading-relaxed text-ink-subtle">
-            Synthetic data only. Uploads are deleted after 48 hours.
+            Synthetic data only. Never upload credentials or secrets.
           </p>
         </div>
       </main>
@@ -56,7 +57,6 @@ export default function SignInPage() {
   );
 }
 
-/** Google's mark, in its own colours as their brand terms require. */
 function GoogleMark() {
   return (
     <svg viewBox="0 0 18 18" className="size-[18px] shrink-0" aria-hidden>

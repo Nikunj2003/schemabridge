@@ -25,7 +25,8 @@ from schemabridge.domain.schema import MAX_FIELDS, TargetFieldSpec, TargetSchema
 from schemabridge.domain.spec import MAX_SPEC_BYTES, SpecError, parse_spec, to_yaml
 from schemabridge.domain.target import BUILTIN_SCHEMA
 from schemabridge.server import schemas as store
-from schemabridge.server.sessions import ensure_session, read_session
+from schemabridge.server.auth import principal_from_request
+from schemabridge.server.sessions import require_same_origin
 
 logger = logging.getLogger(__name__)
 
@@ -114,12 +115,8 @@ def _build(payload: SchemaInput, schema_id: str, version: int) -> TargetSchema:
 
 
 def _require_session(request: Request) -> str:
-    session_id = read_session(request)
-    if not session_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Start a session first."
-        )
-    return session_id
+    """Compatibility name for the workspace id resolved from a verified token."""
+    return principal_from_request(request).owner_id
 
 
 def _unavailable(error: Exception) -> HTTPException:
@@ -133,13 +130,12 @@ def _unavailable(error: Exception) -> HTTPException:
 @router.get("")
 def list_schemas(request: Request) -> dict[str, Any]:
     """The built-in template plus whatever the caller has saved."""
-    session_id = read_session(request)
+    owner_id = principal_from_request(request).owner_id
     saved: list[Any] = []
-    if session_id:
-        try:
-            saved = store.list_schemas(session_id)
-        except Exception as error:
-            raise _unavailable(error) from None
+    try:
+        saved = store.list_schemas(owner_id)
+    except Exception as error:
+        raise _unavailable(error) from None
     return {
         "builtin": target_schema_view(BUILTIN_SCHEMA),
         "schemas": [
@@ -259,9 +255,10 @@ def read_schema(schema_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-def create_schema(request: Request, response: Response, payload: SchemaInput) -> dict[str, Any]:
-    """Save a new schema for this visitor."""
-    session_id = ensure_session(request, response)
+def create_schema(request: Request, payload: SchemaInput) -> dict[str, Any]:
+    """Save a schema in the resolved personal or shared workspace."""
+    require_same_origin(request)
+    session_id = _require_session(request)
     # Built with a placeholder id: the store assigns the real one, so a caller
     # cannot choose an id that collides or impersonates the built-in template.
     schema = _build(payload, schema_id="pending", version=1)
@@ -287,6 +284,7 @@ def replace_schema(schema_id: str, request: Request, payload: SchemaInput) -> di
             status_code=status.HTTP_409_CONFLICT,
             detail=("The built-in schema cannot be edited. Save it as a copy and edit that."),
         )
+    require_same_origin(request)
     session_id = _require_session(request)
     if payload.if_version is None:
         raise HTTPException(
@@ -317,6 +315,7 @@ def remove_schema(schema_id: str, request: Request) -> Response:
             status_code=status.HTTP_409_CONFLICT,
             detail="The built-in schema cannot be deleted.",
         )
+    require_same_origin(request)
     session_id = _require_session(request)
     try:
         deleted = store.delete_schema(schema_id, session_id)

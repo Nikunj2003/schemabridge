@@ -2,7 +2,7 @@
 
 No database is available in this suite, so the rule store's module-level
 functions are replaced with an in-memory fake that reproduces the two
-behaviours these routes depend on: ownership scoped to a session, and a
+behaviours these routes depend on: ownership scoped to a workspace, and a
 version-guarded write that fails when the version has moved on. Everything
 else — request validation, status codes, routing order — is exercised for
 real, against the real app.
@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 from main import app
 from schemabridge.api import rule_routes
-from schemabridge.domain.rules import Rule, RuleKind, RuleOrigin
+from schemabridge.domain.rules import MAX_RULES_PER_SESSION, Rule, RuleKind, RuleOrigin
 from schemabridge.domain.target import BUILTIN_SCHEMA
 from schemabridge.server import rules as rule_store
 from schemabridge.server.sessions import SESSION_COOKIE
@@ -47,15 +47,13 @@ class _FakeStore:
         self._seq += 1
         return f"rule_test{self._seq}"
 
-    def create_rule(self, owner_session_id: str, rule: Rule) -> rule_store.RuleRecord:
-        from schemabridge.domain.rules import MAX_RULES_PER_SESSION
-
-        if self.count_for_session(owner_session_id) >= MAX_RULES_PER_SESSION:
+    def create_rule(self, owner_id: str, rule: Rule) -> rule_store.RuleRecord:
+        if self.count_for_session(owner_id) >= MAX_RULES_PER_SESSION:
             raise rule_store.RuleLimitError("limit reached")
         rule_id = self._next_id()
         now = datetime.now(UTC)
         self.rows[rule_id] = {
-            "owner_session_id": owner_session_id,
+            "owner_id": owner_id,
             "rule": rule,
             "version": 1,
             "created_at": now,
@@ -63,94 +61,92 @@ class _FakeStore:
         }
         return rule_store.RuleRecord(
             rule_id,
-            owner_session_id,
+            owner_id,
             rule.model_copy(update={"rule_id": rule_id}),
             1,
             now,
             now,
         )
 
-    def find_rule(self, rule_id: str, owner_session_id: str) -> rule_store.RuleRecord | None:
+    def find_rule(self, rule_id: str, owner_id: str) -> rule_store.RuleRecord | None:
         row = self.rows.get(rule_id)
-        if row is None or row["owner_session_id"] != owner_session_id:
+        if row is None or row["owner_id"] != owner_id:
             return None
         return rule_store.RuleRecord(
             rule_id,
-            owner_session_id,
+            owner_id,
             row["rule"].model_copy(update={"rule_id": rule_id}),
             row["version"],
             row["created_at"],
             row["updated_at"],
         )
 
-    def list_rules(self, owner_session_id: str, limit: int = 200) -> list[rule_store.RuleRecord]:
+    def list_rules(self, owner_id: str, limit: int = 200) -> list[rule_store.RuleRecord]:
         return [
             rule_store.RuleRecord(
                 rule_id,
-                owner_session_id,
+                owner_id,
                 row["rule"].model_copy(update={"rule_id": rule_id}),
                 row["version"],
                 row["created_at"],
                 row["updated_at"],
             )
             for rule_id, row in self.rows.items()
-            if row["owner_session_id"] == owner_session_id
+            if row["owner_id"] == owner_id
         ]
 
-    def count_for_session(self, owner_session_id: str) -> int:
-        return sum(1 for row in self.rows.values() if row["owner_session_id"] == owner_session_id)
+    def count_for_session(self, owner_id: str) -> int:
+        return sum(1 for row in self.rows.values() if row["owner_id"] == owner_id)
 
     def update_rule(
-        self, rule_id: str, owner_session_id: str, rule: Rule, *, if_version: int
+        self, rule_id: str, owner_id: str, rule: Rule, *, if_version: int
     ) -> rule_store.RuleRecord:
         row = self.rows.get(rule_id)
-        if row is None or row["owner_session_id"] != owner_session_id:
+        if row is None or row["owner_id"] != owner_id:
             raise KeyError(rule_id)
         if row["version"] != if_version:
             raise rule_store.StaleWriteError("stale")
         row["rule"] = rule
         row["version"] += 1
         row["updated_at"] = datetime.now(UTC)
-        result = self.find_rule(rule_id, owner_session_id)
+        result = self.find_rule(rule_id, owner_id)
         assert result is not None
         return result
 
-    def delete_rule(self, rule_id: str, owner_session_id: str) -> bool:
+    def delete_rule(self, rule_id: str, owner_id: str) -> bool:
         row = self.rows.get(rule_id)
-        if row is None or row["owner_session_id"] != owner_session_id:
+        if row is None or row["owner_id"] != owner_id:
             return False
         del self.rows[rule_id]
         return True
 
-    def set_enabled(
-        self, rule_id: str, owner_session_id: str, *, enabled: bool
-    ) -> rule_store.RuleRecord:
+    def set_enabled(self, rule_id: str, owner_id: str, *, enabled: bool) -> rule_store.RuleRecord:
         row = self.rows.get(rule_id)
-        if row is None or row["owner_session_id"] != owner_session_id:
+        if row is None or row["owner_id"] != owner_id:
             raise KeyError(rule_id)
         row["rule"] = row["rule"].model_copy(update={"enabled": enabled})
         row["version"] += 1
-        result = self.find_rule(rule_id, owner_session_id)
+        result = self.find_rule(rule_id, owner_id)
         assert result is not None
         return result
 
     def override_builtin(
-        self, owner_session_id: str, builtin_rule_id: str, *, schema_id: str, rationale: str = ""
+        self, owner_id: str, builtin_rule_id: str, *, schema_id: str, rationale: str = ""
     ) -> rule_store.RuleRecord:
         existing = next(
             (
                 rule_id
                 for rule_id, row in self.rows.items()
-                if row["owner_session_id"] == owner_session_id
+                if row["owner_id"] == owner_id
                 and row["rule"].kind is RuleKind.OVERRIDE
                 and row["rule"].targets_rule_id == builtin_rule_id
             ),
             None,
         )
         if existing is not None:
-            return self.set_enabled(existing, owner_session_id, enabled=True)
+            return self.set_enabled(existing, owner_id, enabled=True)
         return self.create_rule(
-            owner_session_id,
+            owner_id,
             _rule(
                 kind=RuleKind.OVERRIDE,
                 origin=RuleOrigin.OVERRIDE,
@@ -187,7 +183,7 @@ def client() -> TestClient:
 def _session_client(
     client: TestClient, session_id: str = "session-a-XXXXXXXXXXXXXXX"
 ) -> TestClient:
-    # `read_session` refuses anything under 20 characters, so a realistic id is
+    # `workspace resolver` refuses anything under 20 characters, so a realistic id is
     # used rather than a short readable stub.
     client.cookies.set(SESSION_COOKIE, session_id)
     return client
@@ -260,7 +256,9 @@ class TestCreate:
         assert body["version"] == 1
         assert body["header"] == "costcentreref"
 
-    def test_no_session_is_unauthorized(self, client: TestClient, fake_store: _FakeStore) -> None:
+    def test_anonymous_workspace_can_create_a_rule(
+        self, client: TestClient, fake_store: _FakeStore
+    ) -> None:
         response = client.post(
             "/api/rules",
             json={
@@ -270,7 +268,7 @@ class TestCreate:
                 "schema_id": _SCHEMA_ID,
             },
         )
-        assert response.status_code == 401
+        assert response.status_code == 201
 
     def test_an_empty_schema_id_is_a_400(self, client: TestClient, fake_store: _FakeStore) -> None:
         """`schema_id` is required for every kind now, not only header_alias and
@@ -386,7 +384,7 @@ class TestUpdate:
 
 
 class TestOwnership:
-    def test_one_session_cannot_read_anothers_rule(
+    def test_anonymous_clients_read_the_same_shared_rule(
         self, client: TestClient, fake_store: _FakeStore
     ) -> None:
         owner = _session_client(TestClient(app), "session-owner-XXXXXXXXXXXXXX")
@@ -402,9 +400,9 @@ class TestOwnership:
 
         stranger = _session_client(TestClient(app), "session-stranger-XXXXXXXXXXX")
         response = stranger.get(f"/api/rules/{created['rule_id']}")
-        assert response.status_code == 404
+        assert response.status_code == 200
 
-    def test_one_session_cannot_modify_anothers_rule(
+    def test_anonymous_clients_can_modify_the_same_shared_rule(
         self, client: TestClient, fake_store: _FakeStore
     ) -> None:
         owner = _session_client(TestClient(app), "session-owner-XXXXXXXXXXXXXX")
@@ -429,12 +427,12 @@ class TestOwnership:
                 "if_version": created["version"],
             },
         )
-        assert response.status_code == 404
+        assert response.status_code == 200
 
         deleted = stranger.delete(f"/api/rules/{created['rule_id']}")
-        assert deleted.status_code == 404
+        assert deleted.status_code == 204
 
-    def test_absent_and_someone_elses_rule_look_identical(
+    def test_anonymous_rule_and_absent_rule_are_distinguishable(
         self, client: TestClient, fake_store: _FakeStore
     ) -> None:
         owner = _session_client(TestClient(app), "session-owner-XXXXXXXXXXXXXX")
@@ -451,8 +449,8 @@ class TestOwnership:
         stranger = _session_client(TestClient(app), "session-stranger-XXXXXXXXXXX")
         theirs = stranger.get(f"/api/rules/{created['rule_id']}")
         absent = stranger.get("/api/rules/rule_does_not_exist")
-        assert theirs.status_code == absent.status_code == 404
-        assert theirs.json() == absent.json()
+        assert theirs.status_code == 200
+        assert absent.status_code == 404
 
 
 def _csv_file(name: str, text: str) -> tuple[str, tuple[str, bytes, str]]:
@@ -520,14 +518,16 @@ class TestPreview:
         assert any(m["header"] == "Cost Centre Ref" for m in body["matched_columns"])
         assert fake_store.rows == {}
 
-    def test_preview_needs_a_session(self, client: TestClient, fake_store: _FakeStore) -> None:
+    def test_anonymous_workspace_can_preview(
+        self, client: TestClient, fake_store: _FakeStore
+    ) -> None:
         csv_text = "Cost Centre Ref\n1001\n"
         response = client.post(
             "/api/rules/preview",
             files=[_csv_file("employees.csv", csv_text)],
             data={"rule": _HEADER_ALIAS_DRAFT},
         )
-        assert response.status_code == 401
+        assert response.status_code == 200
 
 
 class TestToggle:

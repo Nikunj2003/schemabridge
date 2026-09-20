@@ -10,8 +10,9 @@ open — would otherwise silently lose whichever save landed first. Every update
 matches on the version it read and bumps it, so a stale write fails loudly instead
 of overwriting.
 
-Ownership is by session, checked on every read and write. A schema id appears in
-URLs, so it is not a credential.
+Ownership is by workspace, checked on every read and write. A schema id appears
+in URLs, so it is not a credential. Saved in the shared guest workspace, a schema
+is visible to every guest by design; saved while signed in, it is private.
 """
 
 from __future__ import annotations
@@ -30,8 +31,10 @@ from schemabridge.server.mongo import get_client
 _COLLECTION = "target_schemas"
 
 #: Saved schemas per visitor. Enough for several clients, bounded so the shared
-#: cluster cannot be filled by one session.
+#: cluster cannot be filled by one workspace.
 MAX_PER_SESSION = 20
+#: Compatibility name for the old repository API; it now means workspace.
+MAX_PER_WORKSPACE = MAX_PER_SESSION
 
 
 def _schemas() -> Collection[dict[str, Any]]:
@@ -48,7 +51,7 @@ class SchemaRecord:
     """A saved schema, with who owns it and when it last changed."""
 
     schema_id: str
-    owner_session_id: str
+    owner_id: str
     schema: TargetSchema
     created_at: datetime
     updated_at: datetime
@@ -68,14 +71,14 @@ def _record(document: dict[str, Any]) -> SchemaRecord:
     stored["version"] = int(document.get("version", 1))
     return SchemaRecord(
         schema_id=schema_id,
-        owner_session_id=str(document["owner_session_id"]),
+        owner_id=str(document["owner_id"]),
         schema=TargetSchema.model_validate(stored),
         created_at=document["created_at"],
         updated_at=document.get("updated_at", document["created_at"]),
     )
 
 
-def create_schema(owner_session_id: str, schema: TargetSchema) -> SchemaRecord:
+def create_schema(owner_id: str, schema: TargetSchema) -> SchemaRecord:
     """Save a new schema, assigning it an id of our own choosing.
 
     The caller's `schema_id` is ignored: accepting one would let a client claim
@@ -91,7 +94,7 @@ def create_schema(owner_session_id: str, schema: TargetSchema) -> SchemaRecord:
     _schemas().insert_one(
         {
             "_id": schema_id,
-            "owner_session_id": owner_session_id,
+            "owner_id": owner_id,
             "schema": stored,
             "version": 1,
             "created_at": now,
@@ -100,38 +103,36 @@ def create_schema(owner_session_id: str, schema: TargetSchema) -> SchemaRecord:
     )
     return SchemaRecord(
         schema_id,
-        owner_session_id,
+        owner_id,
         schema.model_copy(update={"schema_id": schema_id, "version": 1, "builtin": False}),
         now,
         now,
     )
 
 
-def find_schema(schema_id: str, owner_session_id: str) -> SchemaRecord | None:
+def find_schema(schema_id: str, owner_id: str) -> SchemaRecord | None:
     """One schema the caller owns, or None.
 
     The same answer whether it is absent or someone else's: distinguishing them
     would confirm that a guessed id exists.
     """
-    document = _schemas().find_one({"_id": schema_id, "owner_session_id": owner_session_id})
+    document = _schemas().find_one({"_id": schema_id, "owner_id": owner_id})
     return None if document is None else _record(document)
 
 
-def list_schemas(owner_session_id: str, limit: int = MAX_PER_SESSION) -> list[SchemaRecord]:
+def list_schemas(owner_id: str, limit: int = MAX_PER_WORKSPACE) -> list[SchemaRecord]:
     """A visitor's saved schemas, most recently changed first."""
-    cursor = (
-        _schemas().find({"owner_session_id": owner_session_id}).sort("updated_at", -1).limit(limit)
-    )
+    cursor = _schemas().find({"owner_id": owner_id}).sort("updated_at", -1).limit(limit)
     return [_record(document) for document in cursor]
 
 
-def count_for_session(owner_session_id: str) -> int:
-    return _schemas().count_documents({"owner_session_id": owner_session_id})
+def count_for_session(owner_id: str) -> int:
+    return _schemas().count_documents({"owner_id": owner_id})
 
 
 def update_schema(
     schema_id: str,
-    owner_session_id: str,
+    owner_id: str,
     schema: TargetSchema,
     *,
     if_version: int,
@@ -150,11 +151,11 @@ def update_schema(
     result = _schemas().update_one(
         # The version is part of the filter, not checked beforehand: a read then a
         # write would leave a window where two savers both see the same version.
-        {"_id": schema_id, "owner_session_id": owner_session_id, "version": if_version},
+        {"_id": schema_id, "owner_id": owner_id, "version": if_version},
         {"$set": {"schema": stored, "updated_at": now}, "$inc": {"version": 1}},
     )
     if result.matched_count == 0:
-        existing = _schemas().find_one({"_id": schema_id, "owner_session_id": owner_session_id})
+        existing = _schemas().find_one({"_id": schema_id, "owner_id": owner_id})
         if existing is None:
             raise KeyError(schema_id)
         raise StaleWriteError(
@@ -162,21 +163,21 @@ def update_schema(
             "Reload it to see the current version before saving again."
         )
 
-    updated = find_schema(schema_id, owner_session_id)
+    updated = find_schema(schema_id, owner_id)
     if updated is None:  # pragma: no cover - deleted between write and read
         raise KeyError(schema_id)
     return updated
 
 
-def delete_schema(schema_id: str, owner_session_id: str) -> bool:
+def delete_schema(schema_id: str, owner_id: str) -> bool:
     """Forget a saved schema.
 
     Runs that used it are unaffected: each one snapshotted the schema into its
     own state, so deleting the definition cannot change a migration's history.
     """
-    result = _schemas().delete_one({"_id": schema_id, "owner_session_id": owner_session_id})
+    result = _schemas().delete_one({"_id": schema_id, "owner_id": owner_id})
     return result.deleted_count > 0
 
 
 def ensure_indexes() -> None:
-    _schemas().create_index([("owner_session_id", 1), ("updated_at", -1)])
+    _schemas().create_index([("owner_id", 1), ("updated_at", -1)])

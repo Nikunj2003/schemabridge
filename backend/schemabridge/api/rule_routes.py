@@ -41,7 +41,8 @@ from schemabridge.ingest.profile import profile_columns
 from schemabridge.ingest.xlsx_source import parse_xlsx
 from schemabridge.server import rules as rule_store
 from schemabridge.server import schemas as schema_store
-from schemabridge.server.sessions import read_session, require_same_origin
+from schemabridge.server.auth import principal_from_request
+from schemabridge.server.sessions import require_same_origin
 
 logger = logging.getLogger(__name__)
 
@@ -79,12 +80,8 @@ class ToggleInput(BaseModel):
 
 
 def _require_session(request: Request) -> str:
-    session_id = read_session(request)
-    if not session_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Start a session first."
-        )
-    return session_id
+    """Compatibility name for the resolved workspace id."""
+    return principal_from_request(request).owner_id
 
 
 def _build(payload: RuleInput, *, origin: RuleOrigin) -> Rule:
@@ -196,15 +193,14 @@ def list_rules(request: Request, schema_id: str | None = None) -> dict[str, Any]
     already knows. They see the shipped layer and an empty list of their own, which
     is the truth.
     """
-    session_id = read_session(request) or ""
+    session_id = _require_session(request)
     schema = _resolve_schema_for_projection(schema_id, session_id)
 
     mine: list[Any] = []
-    if session_id:
-        try:
-            mine = rule_store.list_rules(session_id)
-        except Exception as error:
-            raise _unavailable(error) from None
+    try:
+        mine = rule_store.list_rules(session_id)
+    except Exception as error:
+        raise _unavailable(error) from None
 
     overridden_targets = {
         record.rule.targets_rule_id

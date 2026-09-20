@@ -26,6 +26,10 @@ dependencies = [
   "pyyaml==6.0.3",
   # Outbound delivery to the destination API.
   "httpx==0.28.1",
+  # Auth0 access-token validation against its rotating JWKS endpoint.
+  "PyJWT[crypto]==2.11.0",
+  # Optional at runtime (disabled by default), declared for the enablement path.
+  "langfuse==3.14.0",
   # Transitively required by requests (via langchain); declared explicitly so
   # the runtime does not emit a missing-dependency warning on every import.
   "charset-normalizer==3.4.4",
@@ -69,7 +73,7 @@ warn_unreachable = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["langgraph.*", "langchain_openai.*", "langchain_core.*"]
+module = ["langgraph.*", "langchain_openai.*", "langchain_core.*", "jwt", "jwt.*", "langfuse", "langfuse.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

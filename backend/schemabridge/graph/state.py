@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Annotated, Any, TypedDict
 
 from schemabridge.domain.models import (
@@ -101,7 +102,11 @@ class MigrationState(TypedDict, total=False):
 
     # --- Identity and configuration -------------------------------------
     run_id: str
-    owner_session_id: str
+    #: Server-derived opaque workspace id; never a browser-provided owner value.
+    owner_id: str
+    workspace_kind: str
+    #: Immutable retention deadline captured when the run starts.
+    run_expires_at: datetime
     policy_version: str
     #: The contract this run maps onto, snapshotted at creation rather than
     #: referenced by id. Editing a saved schema must not change what a paused run

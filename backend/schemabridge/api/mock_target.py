@@ -36,6 +36,7 @@ import hashlib
 import json
 import logging
 import secrets
+from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
@@ -50,7 +51,7 @@ from schemabridge.server.receipts import (
     find_receipt,
     store_receipt,
 )
-from schemabridge.server.target_client import SCHEMA_HEADER
+from schemabridge.server.target_client import RUN_EXPIRY_HEADER, SCHEMA_HEADER
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,7 @@ async def create_employee(
     fail_once: Annotated[str | None, Header(alias=_FAIL_ONCE_HEADER)] = None,
     reject: Annotated[str | None, Header(alias=_REJECT_HEADER)] = None,
     target_schema: Annotated[str | None, Header(alias=SCHEMA_HEADER)] = None,
+    run_expires_at: Annotated[str | None, Header(alias=RUN_EXPIRY_HEADER)] = None,
 ) -> JSONResponse:
     """Accept one employee record."""
     token = authorization.removeprefix("Bearer ").strip() if authorization else None
@@ -170,9 +172,17 @@ async def create_employee(
 
     digest = payload_hash(payload)
     target_id = f"DEST-{digest[:10].upper()}"
+    expires_at: datetime | None = None
+    if run_expires_at:
+        try:
+            expires_at = datetime.fromisoformat(run_expires_at)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="Run expiry header is invalid."
+            ) from None
 
     try:
-        receipt = store_receipt(idempotency_key, target_id, digest, payload)
+        receipt = store_receipt(idempotency_key, target_id, digest, payload, expires_at=expires_at)
     except PayloadConflictError as conflict:
         # Reusing a key for different data would let the destination hold two
         # versions of one identity. Refuse rather than guess which is correct.

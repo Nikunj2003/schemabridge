@@ -1,6 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { useWorkspace } from "@/components/auth/workspace-provider";
 import { api, type MigrationUsage } from "@/lib/api";
 
 type MigrationUsageContextValue = {
@@ -11,8 +12,9 @@ type MigrationUsageContextValue = {
 
 const MigrationUsageContext = createContext<MigrationUsageContextValue | null>(null);
 
-/** Server-authoritative migration allowance for this anonymous browser session. */
+/** Server-authoritative allowance for the selected personal or shared workspace. */
 export function MigrationUsageProvider({ children }: { children: React.ReactNode }) {
+  const { mode } = useWorkspace();
   const [usage, setUsage] = useState<MigrationUsage | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -33,7 +35,7 @@ export function MigrationUsageProvider({ children }: { children: React.ReactNode
     // rejects a synchronous state update from an effect body.
     const timer = window.setTimeout(() => void refresh(), 0);
     return () => window.clearTimeout(timer);
-  }, [refresh]);
+  }, [mode, refresh]);
 
   const value = useMemo(() => ({ usage, error, refresh }), [usage, error, refresh]);
   return <MigrationUsageContext.Provider value={value}>{children}</MigrationUsageContext.Provider>;

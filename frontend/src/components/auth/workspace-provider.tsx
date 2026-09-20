@@ -49,11 +49,16 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
         redirect_uri: typeof window === "undefined" ? undefined : window.location.origin,
       }}
       useRefreshTokens
-      // In memory rather than local storage: a token in storage is readable by
-      // any script that reaches this origin.
-      cacheLocation="memory"
+      // Persisted, so a reload or a returning visit does not silently drop the
+      // session — with `memory` the person appeared signed out after any refresh.
+      // The stored refresh token is rotating and therefore single-use, which is
+      // what makes this an acceptable trade for a token in browser storage.
+      cacheLocation="localstorage"
       onRedirectCallback={(state?: AppState) => {
-        window.history.replaceState({}, document.title, state?.returnTo ?? "/app");
+        // A real navigation, not `history.replaceState`. Rewriting the address
+        // bar alone left the router on the previous route, so signing in showed
+        // the sign-in page under an /app URL.
+        window.location.replace(returnTarget(state?.returnTo));
       }}
     >
       <ConfiguredWorkspaceProvider>{children}</ConfiguredWorkspaceProvider>
@@ -61,8 +66,32 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** Where to land after Google returns.
+ *
+ * Only a same-origin path is honoured: `returnTo` survives a round trip through
+ * the identity provider, so treating it as a URL would be an open redirect.
+ * Signing in from the sign-in page itself has to go on to the app rather than
+ * back to the page whose job is already done.
+ */
+function returnTarget(returnTo?: string): string {
+  if (!returnTo || !returnTo.startsWith("/") || returnTo.startsWith("//")) return "/app";
+  return returnTo === "/signin" || returnTo === "/" ? "/app" : returnTo;
+}
+
 function GuestWorkspaceProvider({ children }: { children: React.ReactNode }) {
-  useEffect(() => configureAccessTokenProvider(null), []);
+  useEffect(() => {
+    configureAccessTokenProvider(null);
+    // These are inlined at build time, so a deployment built before they were
+    // set has no way to sign anyone in. Saying so in the console turns a dead
+    // button into a diagnosable one.
+    if (process.env.NODE_ENV !== "test") {
+      console.warn(
+        "Auth0 is not configured in this build: NEXT_PUBLIC_AUTH0_DOMAIN, " +
+          "NEXT_PUBLIC_AUTH0_CLIENT_ID and NEXT_PUBLIC_AUTH0_AUDIENCE must be " +
+          "present at build time. Running in the shared guest workspace.",
+      );
+    }
+  }, []);
   const value = useMemo<WorkspaceContextValue>(
     () => ({
       mode: "anonymous",
@@ -114,7 +143,8 @@ function ConfiguredWorkspaceProvider({ children }: { children: React.ReactNode }
       signInWithGoogle: async () => {
         setPreferGuest(false);
         await loginWithRedirect({
-          appState: { returnTo: pathname || "/app" },
+          // Where they were, unless that is the sign-in page itself.
+          appState: { returnTo: returnTarget(pathname) },
           // Names the connection, so Universal Login goes straight to Google
           // rather than offering it among other options.
           authorizationParams: { connection: "google-oauth2" },

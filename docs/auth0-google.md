@@ -44,3 +44,26 @@ NEXT_PUBLIC_AUTH0_AUDIENCE=https://api.schemabridge.app
 ```
 
 Set production callback/logout/web origins before deploying to that production origin. Never set a `NEXT_PUBLIC_` value for `OBSERVABILITY_API_SECRET`, Langfuse secrets, NVIDIA keys, Mongo URI, or Auth0 server credentials.
+
+## The `NEXT_PUBLIC_*` values are needed at build time
+
+These three are inlined into the browser bundle when the frontend is built, not
+read at runtime:
+
+- `NEXT_PUBLIC_AUTH0_DOMAIN`
+- `NEXT_PUBLIC_AUTH0_CLIENT_ID`
+- `NEXT_PUBLIC_AUTH0_AUDIENCE`
+
+So setting them in the hosting platform **after** a deployment has been built
+does nothing for that deployment: it ships with no Auth0 settings, falls back to
+the shared guest workspace, and the Google button renders disabled. Set them
+first, then redeploy — and if sign-in ever looks inert, check the browser console,
+where the guest fallback says exactly this.
+
+## Preview deployments
+
+Each preview gets its own generated URL, and Auth0 only accepts callbacks it has
+been told about. Sign-in therefore works on `http://localhost:3000` and on the
+registered production origin. To use it from a preview, add that specific preview
+URL to Allowed Callback URLs, Allowed Logout URLs and Allowed Web Origins, or
+register a wildcard for the deployment domain.

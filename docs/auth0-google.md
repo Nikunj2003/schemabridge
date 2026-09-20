@@ -1,6 +1,8 @@
 # Auth0 Google sign-in setup
 
-SchemaBridge uses one Auth0 Single-Page Application and one RS256 API.
+SchemaBridge uses one Auth0 Single-Page Application and one RS256 API. The
+browser receives only public SPA configuration; the API verifies access tokens
+and derives the workspace owner server-side.
 
 ## Auth0 resources
 
@@ -8,34 +10,60 @@ Create these in the Auth0 tenant:
 
 1. **Application:** `SchemaBridge Web`, type **Single Page Web Application**.
    - Enable Authorization Code with PKCE and refresh-token rotation.
-   - Add each deployment origin exactly to Allowed Callback URLs, Allowed Logout URLs, and Allowed Web Origins. For local development use `http://localhost:3000`.
-2. **API:** `SchemaBridge API`, identifier `https://api.schemabridge.app`, signed with **RS256**.
-   - Add `migrations:read` and `migrations:write` permissions.
-   - Authorize `SchemaBridge Web` for both permissions.
+   - Authorise it for the SchemaBridge API permissions
+     `migrations:read` and `migrations:write`.
+2. **API:** `SchemaBridge API`, identifier `https://api.schemabridge.app`, signed
+   with **RS256**.
 
-The browser receives only the Auth0 domain, SPA client id, and API audience. Do not place an Auth0 Management API token or an application secret in browser configuration.
+For every application origin, configure three distinct Auth0 allow-list entries:
+
+| Setting | Local development | Production/preview pattern |
+| --- | --- | --- |
+| Allowed Callback URLs | `http://localhost:3000/app` | `https://your-origin/app` |
+| Allowed Logout URLs | `http://localhost:3000` | `https://your-origin` |
+| Allowed Web Origins | `http://localhost:3000` | `https://your-origin` |
+
+The frontend redirects to `${origin}/app` after sign-in, so registering only the
+origin as a callback URL is incorrect. Each preview URL needs its own entries
+unless the Auth0 tenant policy permits a safe wildcard for that deployment domain.
 
 ## Google-only Universal Login
 
-The Auth0 MCP API cannot configure the Google connection because Google OAuth client credentials are required. In Auth0 Dashboard:
+In the Auth0 Dashboard:
 
-1. Create or configure the **Google / Google OAuth2** social connection with a Google Cloud OAuth client id and secret.
-2. Enable that connection for **SchemaBridge Web** only.
+1. Configure the **Google / Google OAuth2** social connection.
+2. Enable it for **SchemaBridge Web** only.
 3. Disable database, passwordless, and other connections for this application.
-4. Do not add an organization requirement or a Google Workspace domain restriction; this allows any valid Google account to create an Auth0 account at first login.
+4. Do not configure an organization requirement or a hosted-domain restriction if
+   any valid Google account should be able to create an account at first login.
 
-The frontend deliberately sends `connection=google-oauth2`, so it bypasses a connection picker and cannot select a non-Google option.
+The frontend passes `connection=google-oauth2`, which deliberately bypasses a
+connection picker. Consumer Gmail and Google Workspace accounts can both sign in.
+A Workspace administrator may independently block third-party OAuth applications;
+that Google-side policy cannot be bypassed by SchemaBridge.
 
-## Environment
+### Production Google credentials
 
-Server-only (`.env.local`):
+Auth0 permits testing a Google connection with shared developer keys, but Auth0
+documents that setup as non-production. It produces an Auth0-branded consent
+screen and has limitations around custom domains, SSO/session checks, federated
+logout, MFA, and redirect Actions. For a deployed application, create a Google
+Cloud OAuth client owned by the project and place its client id and secret in the
+Auth0 Google connection. This is an Auth0/Google configuration change; the
+SchemaBridge frontend already uses the correct connection name.
+
+## Environment boundary
+
+Server-only root `.env.local` values validate access tokens:
 
 ```dotenv
 AUTH0_ISSUER=https://YOUR_TENANT_REGION.auth0.com
 AUTH0_AUDIENCE=https://api.schemabridge.app
+AUTH0_JWKS_CACHE_SECONDS=3600
 ```
 
-Frontend deployment environment:
+Public frontend values belong in `frontend/.env.local` locally, or in the
+frontend deployment environment:
 
 ```dotenv
 NEXT_PUBLIC_AUTH0_DOMAIN=YOUR_TENANT_REGION.auth0.com
@@ -43,27 +71,30 @@ NEXT_PUBLIC_AUTH0_CLIENT_ID=YOUR_SPA_CLIENT_ID
 NEXT_PUBLIC_AUTH0_AUDIENCE=https://api.schemabridge.app
 ```
 
-Set production callback/logout/web origins before deploying to that production origin. Never set a `NEXT_PUBLIC_` value for `OBSERVABILITY_API_SECRET`, Langfuse secrets, NVIDIA keys, Mongo URI, or Auth0 server credentials.
+Never expose an Auth0 application secret, Management API token, MongoDB URI,
+inference key, Langfuse secret, or `OBSERVABILITY_API_SECRET` through a
+`NEXT_PUBLIC_*` variable.
 
-## The `NEXT_PUBLIC_*` values are needed at build time
+## Build-time behaviour
 
-These three are inlined into the browser bundle when the frontend is built, not
-read at runtime:
+Next.js replaces these public values while creating the browser bundle:
 
 - `NEXT_PUBLIC_AUTH0_DOMAIN`
 - `NEXT_PUBLIC_AUTH0_CLIENT_ID`
 - `NEXT_PUBLIC_AUTH0_AUDIENCE`
 
-So setting them in the hosting platform **after** a deployment has been built
-does nothing for that deployment: it ships with no Auth0 settings, falls back to
-the shared guest workspace, and the Google button renders disabled. Set them
-first, then redeploy — and if sign-in ever looks inert, check the browser console,
-where the guest fallback says exactly this.
+Adding or changing them after a deployment build leaves that deployment with its
+old bundle. Set the values before deployment, then redeploy. If sign-in appears
+inert, inspect the browser console and confirm the deployed frontend was built
+with all three values.
 
-## Preview deployments
+## Workspace behaviour
 
-Each preview gets its own generated URL, and Auth0 only accepts callbacks it has
-been told about. Sign-in therefore works on `http://localhost:3000` and on the
-registered production origin. To use it from a preview, add that specific preview
-URL to Allowed Callback URLs, Allowed Logout URLs and Allowed Web Origins, or
-register a wildcard for the deployment domain.
+A valid access token is verified using the Auth0 issuer, audience, RS256
+signature, expiry, and rotating JWKS. The API hashes the verified issuer and
+subject into an opaque personal workspace id. The browser cannot choose it.
+
+No bearer token intentionally selects one shared anonymous workspace. Invalid or
+expired supplied tokens receive a 401 rather than guest access. The personal and
+shared workspace policies, quotas, and retention are documented in
+[Operations](operations.md).

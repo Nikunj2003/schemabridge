@@ -1,232 +1,221 @@
 # SchemaBridge
 
-An AI-assisted data migration workbench. It ingests several inconsistent
-exports of the same entity, works out how they map onto a target schema, safely
-cleans what it can, and pushes validated records to a destination API —
-pausing to ask a human only when a decision genuinely needs judgement.
+SchemaBridge is an AI-assisted workbench for reconciling inconsistent data exports
+into a declared target schema. It ingests several CSV or Excel files, preserves
+what each source said, applies only meaning-preserving transformations, and sends
+validated records to a destination API. It asks a reviewer only when the evidence
+does not support a safe decision.
 
-> **Status:** working prototype on synthetic data. Not hardened for real
-> employee records. See [Known limitations](#known-limitations).
+> **Prototype boundary:** SchemaBridge uses synthetic data and is not hardened for
+> real personal data. Read [limitations](#known-limitations) before operating it.
 
 ## Why it exists
 
-Migrations stall on the same problem: the source files disagree with each
-other. Column names differ, dates arrive in three formats, the same person
-appears twice with conflicting details, required values are missing.
-
-Manual mapping tools make a human confirm every field, which does not scale.
-Fully automatic tools guess silently, which is worse — a wrong guess on a start
-date is invisible until payroll runs.
-
-SchemaBridge takes the middle path: act where the evidence is unambiguous,
-escalate a small well-explained queue where it is not.
+Exports that describe the same people rarely agree. Headers vary, dates use
+multiple conventions, values conflict, and required fields may be missing.
+Confirming every value manually is slow; silently guessing is unsafe. SchemaBridge
+uses a narrower contract instead: automate an answer only when it is supported by
+explicit policy, then make uncertainty visible and actionable.
 
 ## How it decides
 
-Every mapping lands in one of four outcomes:
+Every source column reaches one of four outcomes:
 
-1. **Rule-applied** — the header matches a known alias, values are
-   type-compatible, no other column competes for the same target. Applied
-   automatically. The rule may be one that shipped, or one this user taught.
-2. **Model-assisted** — an unfamiliar header. A language model proposes
-   candidates; a proposal is applied only if independent deterministic checks
-   agree. Model confidence alone is never permission.
-3. **Escalated** — two plausible targets, competing columns, a missing
-   required field, or a transformation that would change meaning.
-4. **Skipped** — a rule says this column carries nothing worth migrating.
+1. **Rule-applied** — a shipped or approved, schema-scoped rule matches without a
+   competing target. The mapping is applied deterministically.
+2. **Model-assisted** — an unfamiliar header is sent to the model for a structured
+   proposal. Application code independently checks the target, occupancy, and
+   value-kind compatibility before accepting it. Model confidence is never
+   permission to write.
+3. **Escalated** — a plausible ambiguity, identity conflict, missing required
+   value, invalid record, or meaning-changing cleanup becomes a plain-language
+   question for a reviewer.
+4. **Excluded** — an explicit rule or reviewer decision says the value should not
+   enter the target record.
 
-The model proposes. Application code decides. It cannot rewrite rows, invent
-missing values, or reach the destination API.
+The model proposes; policy code decides. The model cannot directly rewrite rows,
+invent missing values, or call the destination API.
 
-Records are validated **exactly twice**: once as mapped, then once more after a
-single bounded pass of safe repairs. A record failing both is escalated with
-both error sets, rather than retried indefinitely. A learned rule widens what
-that single pass can fix; it never buys a third attempt.
+Records that validate on their first evaluation continue immediately. A failing
+record gets **one bounded automatic safe-repair pass** and a re-evaluation. If it
+still fails, the reviewer sees the error evidence rather than an unbounded retry
+loop. A later human correction is reprocessed and validated; it is not trusted
+just because a person entered it.
 
-## The loop that makes a human answer worth keeping
+## Learning without broadening trust
 
-A migration engine that asks the same question every week is not learning
-anything from the most expensive input it receives — a person's judgement. So
-when a question is answered, the model does a second job: it reads the decision
-and drafts the *rule* that would have made the question unnecessary. The person
-approves or declines. Nothing is stored unless they approve.
+An approved answer can become a reusable rule, not a hidden prompt-memory effect.
+SchemaBridge drafts a rule from a reviewed decision or a verified model mapping;
+the reviewer can inspect its provenance and keep or decline it. A saved rule is:
 
-```
-rules (shipped + yours)  →  unmatched?  →  LLM proposes  →  verifier
-                                                             ├─ accepted → applied
-                                                             └─ refused  → you decide
-                                                                              ↓
-                                                            LLM drafts a rule from it
-                                                                              ↓
-                                                            you approve → next run
-                                                            never asks again
-```
+- **schema-scoped**, so one contract's vocabulary cannot change another's run;
+- **data, not executable code**, using normalised equality rather than a custom
+  predicate;
+- **previewable** before it is saved;
+- **validated through the same checks** whether it was written by a person or
+  proposed by the model; and
+- effective on **future runs**. A migration's schema and active rule set are
+  snapshotted when it starts, so an answer cannot silently change half of an
+  already-delivered run.
 
-Measured on the sample files: a file whose enum spelling the engine does not
-know produces one blocking question per record. One approved rule takes the same
-file to **zero questions and zero model requests**, and the audit names the rule
-that answered.
+This is also the token strategy. Known headers and prior approved decisions do not
+need a model call. The model is reserved for genuine semantic uncertainty and
+rule drafting, so each request has a specific job and the audit can show both
+model requests made and requests avoided.
 
-Four things keep that safe:
+## Architecture at a glance
 
-- **A rule is data, never an expression.** Matching is equality on a normalised
-  string. There is no user-supplied regex or predicate, which is also what makes
-  a rule previewable against a real file before it is saved.
-- **A rule belongs to exactly one schema.** So teaching one client's quirk cannot
-  change another client's migration, and the rules page can answer "will this
-  affect the run I am about to start".
-- **A rule cannot resolve an ambiguous column.** A header two fields both claim —
-  `Date`, where the schema has both a start and an end — is what makes that column
-  escalate. Rules are refused there, by hand or by model, because the failure
-  would be silent: every row misdated with nothing saying so.
-- **Hand-written and drafted rules face the same verification.** One function,
-  shared. Otherwise the automated path would be the safe one and the manual path
-  the dangerous one.
-
-The audit marks every step with what did the work — the LLM, the rule engine, or
-you — and a rule that answered carries the rule's own identity, so "no model
-request was made" reads as a result rather than a missing feature.
-
-## Architecture
-
-One repository, one deployment, one URL.
-
-```
-Browser
-   │
-   ├── /            →  Next.js 16 + TypeScript      (workbench UI)
-   └── /api/*       →  FastAPI + Python 3.12        (migration engine)
-                          │
-                          ├── ingestion      CSV + Excel, enforced limits
-                          ├── profiling      pandas column statistics
-                          ├── mapping policy explicit gates, no blended score
-                          ├── cleanup        meaning-preserving repairs only
-                          ├── identity       conservative reconciliation
-                          ├── validation     two passes, then escalate
-                          ├── LangGraph      checkpointed workflow + interrupts
-                          └── mock target    protected stub over real HTTP
-                                 │
-              ┌──────────────────┴───────────────────┐
-              ▼                                      ▼
-      MongoDB Atlas                        NVIDIA-hosted model
-   (checkpoints, projection,              (mapping proposals only)
-    receipts, budgets)
+```text
+Browser: Next.js + React
+  │  Google sign-in or deliberately shared guest workspace
+  ▼
+/api/*: FastAPI migration service
+  ├─ ingest + profile → deterministic mapping/rules → verified model proposal
+  ├─ reconcile → safe cleanup → validation → explicit human interruption
+  ├─ bounded, idempotent HTTP delivery → post-delivery rule proposal
+  └─ durable audit events for system, rule, model, and reviewer actions
+  │
+  ├─ MongoDB Atlas: checkpoints, run manifests, schemas/rules, receipts,
+  │                quotas, model exchanges, and rate reservations
+  ├─ NVIDIA-compatible model endpoint: globally spaced at 45 RPM with retry
+  └─ optional Langfuse: disabled by default and fail-open when enabled
 ```
 
-### Durable human-in-the-loop
+The detailed data flow, trust boundaries, retention design, and diagrams are in
+[the architecture guide](docs/architecture.md). Its shareable visual companion
+is published at **[SchemaBridge architecture report](https://nikunj.codenex.dev/artifacts/schemabridge/schemabridge-architecture.html)**.
 
-The workflow is a LangGraph `StateGraph` checkpointed to MongoDB. When the
-agent reaches something ambiguous it calls `interrupt()`; the run pauses with
-its state persisted. A later request resumes it with `Command(resume=decision)`.
+### Durable human review
 
-This matters because the backend runs as serverless functions: each request is
-a different process, so in-memory state would lose every paused run. The
-checkpointer is what makes "pause for a human" survive that. Graph position
-lives only in the checkpointer — the application's own collections hold the
-reviewer-facing projection, delivery receipts, sessions and usage budgets.
+The migration workflow is a MongoDB-checkpointed LangGraph state machine. When
+it reaches a genuine judgement call, it interrupts with evidence and persists
+its exact graph state. A later request can apply approve, correct, reject, or
+exclude decisions and resume safely—even if it lands in a different serverless
+process. Browser requests deliberately advance only a bounded number of steps;
+closing the tab pauses scheduling, not the persisted run.
+
+## Workspaces, limits, and retention
+
+| Workspace | Visibility | Daily migration starts | Retention |
+| --- | --- | ---: | ---: |
+| Google-backed personal workspace | Isolated to the verified Auth0 subject | 20 per India calendar day | 168 hours |
+| Shared anonymous workspace | Intentionally visible to every guest | 100 total per India calendar day | 48 hours |
+
+A missing access token selects the shared guest workspace intentionally. A
+supplied token is always verified against Auth0's issuer, audience, signature,
+and rotating JWKS; an invalid token is rejected rather than falling back to the
+guest workspace.
+
+Input limits are enforced server-side: up to three files, 2 MiB combined, 500
+rows per file, 1,000 rows total, and 50 columns. Migration-start limits are
+separate from the shared model budget and the provider's 45-RPM request gate.
 
 ## Tech stack
 
 | Layer | Choice |
 | --- | --- |
-| UI | Next.js 16 (App Router), React 19, TypeScript, Tailwind v4 |
+| UI | Next.js 16, React 19, TypeScript, Tailwind CSS |
 | API | FastAPI, Python 3.12, Pydantic |
-| Orchestration | LangGraph with the MongoDB checkpointer |
-| Model | Open-weights, via an OpenAI-compatible endpoint (see below) |
-| Data | pandas (profiling), openpyxl (Excel), jsonschema (target contract) |
-| Database | MongoDB Atlas |
-| Tests | pytest, ruff, mypy (strict) |
+| Workflow | LangGraph with MongoDB checkpointing and interrupts |
+| Data | pandas, openpyxl, JSON Schema, YAML |
+| Identity | Auth0 SPA + RS256 API access tokens; Google-only login |
+| Persistence | MongoDB Atlas |
+| Model | OpenAI-compatible, open-weights endpoint |
+| Telemetry | Durable model-exchange evidence; optional Langfuse export |
+| Quality | pytest, Ruff, strict mypy, frontend lint/typecheck/build |
 
-### On the model
+### Model boundary
 
-Set `NVIDIA_MODEL` to any OpenAI-compatible open-weights model. Two are tested:
+`NVIDIA_MODEL` is configurable. The code fallback is
+`nvidia/nemotron-3.5-lightning-30b-a3b`; `.env.example` demonstrates
+`openai/gpt-oss-20b` as an alternative. Schema-constrained output is requested
+from the provider, then treated as untrusted input by deterministic verification.
 
-| Model | Licence | Measured |
-| --- | --- | --- |
-| `openai/gpt-oss-20b` (default) | Apache-2.0 | ~2–11s for a schema-constrained reply |
-| `nvidia/nemotron-3.5-lightning-30b-a3b` | NVIDIA open model licence | 17s when idle, 75s when the free endpoint is busy |
+Each logical model exchange is recorded with its run, operation, attempts,
+latency, sanitised request/response information, and the same expiry as its run.
+A Mongo-coordinated gate spaces provider starts globally at 45 RPM. Transient
+provider failures retry within a bounded request window without double-charging
+the logical model budget. Langfuse is off by default; when deliberately enabled,
+telemetry failures do not fail a migration.
 
-Switching is a one-line change with no code edit, which matters more than it
-sounds: free endpoints fluctuate hard. The same Nemotron endpoint answered a
-bare ping in 17s one hour and 75s the next. The adapter sends the switches both
-families use and sizes the output ceiling per family, so either works unchanged.
+## Local setup
 
-Three settings come from measurement rather than documentation:
-
-- **Reasoning is minimised.** With it left on, schema-constrained requests
-  exceeded 45s and returned nothing usable, having spent the whole token budget
-  thinking. At low effort the same request answers in about 11s.
-- **Output headroom is generous.** A reasoning model emits its thinking first, so
-  at 300 tokens gpt-oss returned *only* reasoning and no answer at all.
-- **Structured output is pinned** to `json_schema` with `strict=True`. Of the
-  four available strategies, the default took twice as long, `json_mode` timed
-  out, and `function_calling` returned a null target *without raising* — which
-  would have written nulls into mappings instead of failing visibly.
-
-If the endpoint is slow or unavailable, the run does not fail: deterministic
-mappings still apply, and the columns the model was meant to help with stay in
-the review queue with the reason shown. A visible gap beats a confident guess.
-
-## Setup
-
-Requires **Python 3.12+**, **Node 24**, and a MongoDB Atlas cluster.
+Requires **Python 3.12+**, **Node 24**, and a MongoDB Atlas connection.
 
 ```bash
-cp .env.example .env.local        # then fill in the values
-
-# backend
-cd backend
-python3 -m venv .venv && ./.venv/bin/pip install -e ".[dev]"
-./.venv/bin/uvicorn main:app --reload --port 8000
-
-# frontend (separate terminal)
-cd frontend && npm install && npm run dev
+cp .env.example .env.local
+./run.sh
 ```
 
-`.env.example` documents every variable. All secrets are server-side and never
-reach the browser.
+`run.sh` prepares the backend and frontend dependencies on first use, then starts
+both services. Open <http://localhost:3000>.
 
-Verify external services before running the app:
+Configure server-only values in the root `.env.local`. Configure the three public
+Auth0 values in `frontend/.env.local` before starting or building the frontend:
 
-```bash
-cd backend
-./.venv/bin/python -m schemabridge.smoke.mongo    # Atlas connectivity
-./.venv/bin/python -m schemabridge.smoke.nvidia   # model access and latency
+```dotenv
+NEXT_PUBLIC_AUTH0_DOMAIN=YOUR_TENANT_REGION.auth0.com
+NEXT_PUBLIC_AUTH0_CLIENT_ID=YOUR_SPA_CLIENT_ID
+NEXT_PUBLIC_AUTH0_AUDIENCE=https://api.schemabridge.app
 ```
+
+`NEXT_PUBLIC_*` values are embedded at frontend build time. Setting them after a
+deployment is built does not change the browser bundle; redeploy after changing
+them. See [Auth0 and Google setup](docs/auth0-google.md) for callback URLs and
+safe configuration boundaries.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `cd backend && ./.venv/bin/pytest -q` | Tests (no network needed) |
-| `cd backend && ./.venv/bin/ruff check .` | Lint |
-| `cd backend && ./.venv/bin/mypy schemabridge main.py` | Types (strict) |
+| `cd backend && ./.venv/bin/pytest -q` | Run backend tests |
+| `cd backend && ./.venv/bin/ruff check .` | Lint Python |
+| `cd backend && ./.venv/bin/ruff format --check .` | Check Python formatting |
+| `cd backend && ./.venv/bin/mypy schemabridge main.py` | Run strict type checks |
 | `cd frontend && npm run lint` | Lint the UI |
-| `cd frontend && npm run typecheck` | Types |
-| `cd frontend && npm run build` | Production build |
+| `cd frontend && npm run typecheck` | Type-check the UI |
+| `cd frontend && npm run build` | Build the production UI |
+
+For a cross-process checkpoint demonstration, use the documented two-phase
+commands in [the demo guide](docs/demo-guide.md) against a configured local
+MongoDB instance.
+
+## API surfaces
+
+- [`/api/health`](/api/health) reports configuration state without exposing
+  credentials. It is not a live dependency probe.
+- [`/api/docs`](/api/docs) provides the interactive API documentation.
+- [`/api/openapi.json`](/api/openapi.json) provides the OpenAPI document.
+- `/api/observability/*` is intentionally separate: it requires the server-only
+  operator secret, not an end-user Auth0 token.
 
 ## Known limitations
 
-- **Synthetic data only.** No real personal data should be uploaded.
-- **Bounded inputs.** Small file, row and column limits are enforced
-  server-side to stay within free-tier capacity.
-- **Progress needs an open tab.** State is durable and resumes on reload, but
-  the browser drives each processing step; there is no background worker.
-- **Delivery is at-least-once with idempotent effects.** A request whose
-  response is lost is retried under the same idempotency key, so the
-  destination cannot create a duplicate. This is not exactly-once.
-- **Shared inference budget.** The public demo caps model requests, so heavy
-  traffic can temporarily exhaust capacity.
+- **Synthetic-data prototype.** Do not upload real personal data.
+- **Browser-driven scheduling.** State survives a reload, but no background
+  worker advances a run while every browser tab is closed.
+- **At-least-once delivery.** The destination sees a stable idempotency key, so a
+  lost response can be retried without duplicate effects; this is not exactly-once
+  transport and there is no compensating rollback endpoint.
+- **Bounded capacity.** Uploads, per-run model requests, daily model use, and
+  shared provider throughput are capped for a demo environment.
+- **Model verification is not semantic proof.** Deterministic gates reject
+  structurally unsafe proposals, but ambiguous business meaning still belongs to
+  a reviewer.
 
 ## Documentation
 
-- [`docs/architecture.md`](docs/architecture.md) — design and data flow
-- [`docs/approach.md`](docs/approach.md) — the autonomy boundary, in one page
-- [`docs/demo-guide.md`](docs/demo-guide.md) — walkthrough
-- [`docs/references.md`](docs/references.md) — prior art consulted
+- [Architecture](docs/architecture.md) — data flow, persistence, trust boundaries, and retention
+- [Approach brief](docs/approach.md) — one-page autonomy and engineering summary
+- [Operations](docs/operations.md) — configuration, deployment, limits, and observability
+- [Schemas and rules](docs/schema-and-rules.md) — contracts, imports, previews, and provenance
+- [Demo guide](docs/demo-guide.md) — sample files and a current walkthrough
+- [Design notes](docs/design-notes.md) — interaction principles
+- [Auth0 and Google setup](docs/auth0-google.md) — sign-in configuration
+- [References](docs/references.md) — runtime services and research/design sources
+- [Detailed architecture report](https://nikunj.codenex.dev/artifacts/schemabridge/schemabridge-architecture.html) — visual system, workflow, retention, and model-control diagrams
+- [Hosted approach brief](https://nikunj.codenex.dev/artifacts/schemabridge/schemabridge-approach-brief.html) — one-page overview of the approach and decision boundary
 
 ## Licence
 
-MIT — see [`LICENSE`](LICENSE) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
-
-Built with the help of AI coding tools.
+MIT — see [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

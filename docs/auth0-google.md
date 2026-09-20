@@ -9,8 +9,8 @@ Create these in the Auth0 tenant:
 1. **Application:** `SchemaBridge Web`, type **Single Page Web Application**.
    - Enable Authorization Code with PKCE and refresh-token rotation.
    - Add each deployment origin exactly to Allowed Callback URLs, Allowed Logout URLs, and Allowed Web Origins. For local development use `http://localhost:3000`.
-2. **API:** `SchemaBridge API`, identifier `https://api.schemabridge.local`, signed with **RS256**.
-   - Add `read:migrations` and `write:migrations` permissions.
+2. **API:** `SchemaBridge API`, identifier `https://api.schemabridge.app`, signed with **RS256**.
+   - Add `migrations:read` and `migrations:write` permissions.
    - Authorize `SchemaBridge Web` for both permissions.
 
 The browser receives only the Auth0 domain, SPA client id, and API audience. Do not place an Auth0 Management API token or an application secret in browser configuration.
@@ -32,7 +32,7 @@ Server-only (`.env.local`):
 
 ```dotenv
 AUTH0_ISSUER=https://YOUR_TENANT_REGION.auth0.com
-AUTH0_AUDIENCE=https://api.schemabridge.local
+AUTH0_AUDIENCE=https://api.schemabridge.app
 ```
 
 Frontend deployment environment:
@@ -40,7 +40,7 @@ Frontend deployment environment:
 ```dotenv
 NEXT_PUBLIC_AUTH0_DOMAIN=YOUR_TENANT_REGION.auth0.com
 NEXT_PUBLIC_AUTH0_CLIENT_ID=YOUR_SPA_CLIENT_ID
-NEXT_PUBLIC_AUTH0_AUDIENCE=https://api.schemabridge.local
+NEXT_PUBLIC_AUTH0_AUDIENCE=https://api.schemabridge.app
 ```
 
 Set production callback/logout/web origins before deploying to that production origin. Never set a `NEXT_PUBLIC_` value for `OBSERVABILITY_API_SECRET`, Langfuse secrets, NVIDIA keys, Mongo URI, or Auth0 server credentials.

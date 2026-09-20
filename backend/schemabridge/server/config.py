@@ -39,9 +39,9 @@ class Settings(BaseSettings):
     mongodb_db: str = Field(default="schemabridge", alias="MONGODB_DB")
 
     # --- Identity --------------------------------------------------------
-    #: Issuer URL without a trailing slash, for example
-    #: ``https://example.us.auth0.com``. The browser receives only the matching
-    #: ``NEXT_PUBLIC_*`` values; API validation settings remain server-only.
+    #: Tenant issuer URL, with or without a trailing slash — see
+    #: ``auth0_issuer_url``, which normalises it. The browser receives only the
+    #: matching ``NEXT_PUBLIC_*`` values; validation settings stay server-only.
     auth0_issuer: str = Field(default="", alias="AUTH0_ISSUER")
     auth0_audience: str = Field(default="", alias="AUTH0_AUDIENCE")
     auth0_jwks_cache_seconds: int = Field(default=3600, alias="AUTH0_JWKS_CACHE_SECONDS")
@@ -73,7 +73,6 @@ class Settings(BaseSettings):
     #: review from spending the allowance one correction at a time.
     max_model_requests_per_run: int = Field(default=6, alias="AI_MAX_REQUESTS_PER_RUN")
     max_model_requests_per_day: int = Field(default=400, alias="AI_MAX_REQUESTS_PER_DAY")
-    #: Starts allowed for one anonymous browser session in an India calendar day.
     #: Starts allowed for one verified Google account each India calendar day.
     authenticated_migration_starts_per_day: int = Field(
         default=20, alias="AUTHENTICATED_MIGRATION_MAX_RUNS_PER_DAY"
@@ -109,6 +108,19 @@ class Settings(BaseSettings):
     @property
     def has_database(self) -> bool:
         return bool(self.mongodb_uri.strip())
+
+    @property
+    def auth0_issuer_url(self) -> str:
+        """The issuer with exactly one trailing slash, as Auth0 puts in `iss`.
+
+        Auth0 issues tokens whose `iss` ends in a slash while its well-known
+        documents are addressed without one, so a value copied from either place
+        has to normalise to the same string. It also seeds the workspace owner id,
+        where an inconsistent spelling would silently give one person two
+        workspaces.
+        """
+        issuer = self.auth0_issuer.strip()
+        return f"{issuer.rstrip('/')}/" if issuer else ""
 
     @property
     def auth0_configured(self) -> bool:

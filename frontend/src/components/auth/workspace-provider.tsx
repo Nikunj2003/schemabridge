@@ -45,7 +45,7 @@ export function WorkspaceProvider({ children }: { children: React.ReactNode }) {
       clientId={clientId}
       authorizationParams={{
         audience,
-        scope: "openid profile email read:migrations write:migrations",
+        scope: "openid profile email migrations:read migrations:write",
         redirect_uri: typeof window === "undefined" ? undefined : window.location.origin,
       }}
       useRefreshTokens

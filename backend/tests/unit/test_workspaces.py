@@ -39,6 +39,32 @@ class TestPrincipalResolution:
             auth.principal_from_request(_request({"Authorization": "Bearer not-a-jwt"}))
         assert refused.value.status_code in {401, 503}
 
+    def test_a_foreign_signed_token_is_refused_not_a_server_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A token the tenant never signed must read as a refusal, not a crash.
+
+        The JWKS client raises `PyJWKClientError` for a key it cannot find, and
+        that does not derive from `InvalidTokenError` — so an unsigned or
+        foreign-signed token escaped as a 500 until it was named explicitly.
+        """
+        import jwt
+        from jwt.exceptions import PyJWKClientError
+
+        settings = get_settings()
+        monkeypatch.setattr(settings, "auth0_issuer", "https://tenant.example.com", raising=False)
+        monkeypatch.setattr(settings, "auth0_audience", "https://api.example", raising=False)
+
+        def no_such_key(*_args: Any, **_kwargs: Any) -> Any:
+            raise PyJWKClientError('Unable to find a signing key that matches: "None"')
+
+        monkeypatch.setattr(auth, "_jwk_client", no_such_key)
+        forged = jwt.encode({"sub": "auth0|intruder"}, "a" * 32, algorithm="HS256")
+
+        with pytest.raises(HTTPException) as refused:
+            auth.validate_access_token(forged)
+        assert refused.value.status_code == 401
+
     def test_a_non_bearer_scheme_is_refused(self) -> None:
         with pytest.raises(HTTPException) as refused:
             auth.principal_from_request(_request({"Authorization": "Basic abc"}))

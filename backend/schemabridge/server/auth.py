@@ -17,6 +17,7 @@ from typing import Any
 import jwt
 from fastapi import HTTPException, Request, status
 from jwt import InvalidTokenError, PyJWKClient
+from jwt.exceptions import PyJWKClientError
 
 from schemabridge.server.config import get_settings
 
@@ -58,7 +59,7 @@ def anonymous_principal() -> WorkspacePrincipal:
 
 def _authenticated_principal(subject: str) -> WorkspacePrincipal:
     settings = get_settings()
-    material = f"{settings.auth0_issuer}\x00{subject}".encode()
+    material = f"{settings.auth0_issuer_url}\x00{subject}".encode()
     # The subject never needs to appear in Mongo, URLs, telemetry, or logs.
     owner_id = f"user:{hashlib.sha256(material).hexdigest()[:32]}"
     return WorkspacePrincipal(
@@ -96,17 +97,22 @@ def validate_access_token(token: str) -> WorkspacePrincipal:
         )
     try:
         signing_key = _jwk_client(
-            f"{settings.auth0_issuer}/.well-known/jwks.json", settings.auth0_jwks_cache_seconds
+            f"{settings.auth0_issuer_url}.well-known/jwks.json",
+            settings.auth0_jwks_cache_seconds,
         ).get_signing_key_from_jwt(token)
         claims: dict[str, Any] = jwt.decode(
             token,
             signing_key.key,
             algorithms=["RS256"],
             audience=settings.auth0_audience,
-            issuer=settings.auth0_issuer,
+            issuer=settings.auth0_issuer_url,
             options={"require": ["exp", "iat", "sub"]},
         )
-    except (InvalidTokenError, ValueError, OSError) as error:
+    except (InvalidTokenError, PyJWKClientError, ValueError, OSError) as error:
+        # `PyJWKClientError` covers a key the tenant does not publish — an
+        # unsigned or foreign-signed token. It does not derive from
+        # `InvalidTokenError`, so without naming it a forged token would escape as
+        # a 500 instead of a refusal.
         logger.info("access token validation failed: %s", type(error).__name__)
         raise _unauthorized() from None
     subject = claims.get("sub")

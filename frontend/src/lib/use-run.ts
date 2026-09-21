@@ -24,7 +24,9 @@ export function useRun(runId: string) {
   // Refs gate concurrent effects without causing a render. `lastSeq` is both the
   // API event cursor and a safeguard against an older overlapping response
   // replacing a newer full run snapshot.
-  const advancing = useRef(false);
+  // Advance and resolve both mutate the same checkpoint. Never start one while
+  // the other is in flight; the API independently enforces the same boundary.
+  const executing = useRef(false);
   const alive = useRef(true);
   const lastSeq = useRef(0);
 
@@ -78,9 +80,9 @@ export function useRun(runId: string) {
 
   /** Execution is bounded and never overlaps another advance from this page. */
   useEffect(() => {
-    if (!run || advancing.current || !run.runnable || run.paused) return;
+    if (!run || executing.current || saving || !run.runnable || run.paused) return;
 
-    advancing.current = true;
+    executing.current = true;
     void (async () => {
       try {
         absorb(await api.advance(runId));
@@ -89,13 +91,19 @@ export function useRun(runId: string) {
           setError(caught instanceof Error ? caught.message : "The migration could not continue.");
         }
       } finally {
-        advancing.current = false;
+        executing.current = false;
       }
     })();
-  }, [run, runId, absorb]);
+  }, [run, runId, absorb, saving]);
 
   const decide = useCallback(
     async (issueId: string, decision: Decision) => {
+      if (!run?.paused || executing.current) {
+        setDecisionError("The migration is still preparing the next review question.");
+        return false;
+      }
+
+      executing.current = true;
       setSaving(true);
       setDecisionError(null);
       try {
@@ -103,12 +111,18 @@ export function useRun(runId: string) {
         return true;
       } catch (caught) {
         setDecisionError(caught instanceof Error ? caught.message : "That decision could not be saved.");
+        try {
+          absorb(await api.readRun(runId, lastSeq.current));
+        } catch {
+          // The original error is the actionable one; polling will retry the read.
+        }
         return false;
       } finally {
+        executing.current = false;
         setSaving(false);
       }
     },
-    [runId, absorb],
+    [run, runId, absorb],
   );
 
   const activity: Activity = !run

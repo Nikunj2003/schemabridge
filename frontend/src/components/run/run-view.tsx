@@ -45,7 +45,11 @@ export function RunView({ runId }: { runId: string }) {
   const answered = run.issues.filter((issue) => issue.status === "resolved");
   const finished = activity === "finished";
   const latest = run.events.at(-1);
-  const question = open[0] ? presentQuestion(open[0], run.records, run.schema_fields) : null;
+  // Open issues can exist while the bounded graph is still reconciling after an
+  // earlier answer. Only an actual LangGraph interrupt is ready for a new decision.
+  const question = run.paused && open[0]
+    ? presentQuestion(open[0], run.records, run.schema_fields)
+    : null;
   const reviewOpen = question !== null && dismissedQuestion !== question.id;
   const modelAssisted = run.events.filter(
     (event) => event.execution_basis === "model_assisted",

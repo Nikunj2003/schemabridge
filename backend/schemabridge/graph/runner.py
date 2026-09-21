@@ -32,7 +32,7 @@ from typing import Any
 
 from langgraph.types import Command
 
-from schemabridge.domain.models import RunPhase
+from schemabridge.domain.models import ResolutionAction, RunPhase
 from schemabridge.graph.builder import compile_graph
 from schemabridge.graph.checkpointer import build_checkpointer
 
@@ -54,6 +54,14 @@ def _config(run_id: str, run_expires_at: datetime | None = None) -> dict[str, An
     if run_expires_at is not None:
         configurable["run_expires_at"] = run_expires_at
     return {"configurable": configurable}
+
+
+class ReviewNotReadyError(RuntimeError):
+    """A decision arrived before the graph reached a review interrupt."""
+
+
+class InvalidReviewDecisionError(ValueError):
+    """A decision does not apply to the checkpoint's pending review payload."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +91,35 @@ def _interrupts(snapshot: Any) -> tuple[dict[str, Any], ...]:
         if isinstance(getattr(pending, "value", None), dict)
         for issue in pending.value.get("issues", [])
     )
+
+
+def _validate_pending_decisions(snapshot: Any, decisions: dict[str, Any]) -> None:
+    """Refuse resume data unless this exact checkpoint is asking for it.
+
+    LangGraph accepts a resume command before an ``interrupt()`` has been reached,
+    then clears it when ordinary work completes. That looks like a successful save
+    to the browser but loses the decision. The interrupt payload is therefore the
+    authority for both readiness and which issue ids may be answered.
+    """
+    pending = {str(issue.get("id", "")): issue for issue in _interrupts(snapshot)}
+    if not pending:
+        raise ReviewNotReadyError("The migration is still preparing the next review question.")
+
+    unknown = set(decisions) - set(pending)
+    if unknown:
+        raise InvalidReviewDecisionError("One or more decisions are no longer awaiting review.")
+
+    actions = {action.value for action in ResolutionAction}
+    for issue_id, choice in decisions.items():
+        if not isinstance(choice, dict):
+            raise InvalidReviewDecisionError("Each review decision must be an object.")
+        action = choice.get("action", ResolutionAction.APPROVE.value)
+        if action not in actions:
+            raise InvalidReviewDecisionError("A review decision named an unknown action.")
+        options = {str(option.get("id", "")) for option in pending[issue_id].get("options", [])}
+        option_id = choice.get("option_id")
+        if option_id is not None and option_id not in options:
+            raise InvalidReviewDecisionError("A review decision selected an unavailable option.")
 
 
 def _run_bounded(
@@ -141,8 +178,10 @@ def resolve(
     workspace_kind: str = "legacy",
     run_expires_at: datetime | None = None,
 ) -> AdvanceResult:
-    """Supply the reviewer's decisions and carry on, still bounded."""
+    """Supply decisions only to the interrupt that is currently pending."""
     graph = _graph(workspace_kind)
+    config = _config(run_id, run_expires_at)
+    _validate_pending_decisions(graph.get_state(config), decisions)
     _run_bounded(graph, run_id, Command(resume=decisions), _STEPS_PER_CALL, run_expires_at)
     return _describe(graph, run_id)
 

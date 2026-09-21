@@ -431,6 +431,12 @@ async def resolve_run(run_id: str, request: Request, decisions: dict[str, Any]) 
         result = await run_in_threadpool(
             runner.resolve, run_id, decisions, record.workspace_kind, record.expires_at
         )
+    except runner.ReviewNotReadyError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from None
+    except runner.InvalidReviewDecisionError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+        ) from None
     except Exception as error:
         logger.exception("resolve failed for %s", run_id)
         raise HTTPException(

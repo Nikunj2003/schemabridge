@@ -244,6 +244,32 @@ class TestCleanRun:
 
 
 class TestMessyRun:
+    def test_resolve_requires_an_actual_pending_interrupt(self, client: httpx.Client) -> None:
+        created = upload(client, "employees-legacy.csv", "employees-hr-export.csv").json()
+
+        # The upload has been accepted but no graph node has reached await_review.
+        # A resume command here used to return 200 and be cleared by an ordinary
+        # node, so the browser had to submit the same decision again later.
+        response = client.post(
+            f"/api/runs/{created['run_id']}/resolve",
+            json={"issue:not-ready": {"action": "approve", "option_id": "missing"}},
+        )
+        assert response.status_code == 409
+        assert "preparing" in response.json()["detail"]
+
+    def test_resolve_rejects_an_issue_outside_the_pending_interrupt(
+        self, client: httpx.Client
+    ) -> None:
+        paused = start(client, "employees-legacy.csv", "employees-hr-export.csv")
+        assert paused["paused"]
+
+        response = client.post(
+            f"/api/runs/{paused['run_id']}/resolve",
+            json={"issue:stale": {"action": "approve", "option_id": "missing"}},
+        )
+        assert response.status_code == 422
+        assert "no longer" in response.json()["detail"]
+
     def test_it_pauses_with_actionable_escalations(self, client: httpx.Client) -> None:
         run = start(client, "employees-legacy.csv", "employees-hr-export.csv")
 
